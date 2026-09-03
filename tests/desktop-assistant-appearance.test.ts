@@ -19,7 +19,7 @@ test('minimal HUD keeps response, appearance, and hide controls functional', asy
   }
   assert.match(overlay, /onHide/);
   assert.match(overlay, /min=\{MIN_ASSISTANT_OPACITY\}/);
-  assert.match(overlay, /content stays readable/);
+  assert.match(overlay, /Opacity changes the app UI only/);
 });
 
 test('surface transparency does not reduce content opacity', async () => {
@@ -32,15 +32,15 @@ test('surface transparency does not reduce content opacity', async () => {
   assert.doesNotMatch(baseCss, /\.surface-live\s*\{[^}]*opacity:/);
 });
 
-test('opacity shortcuts and Settings Appearance are wired to the same preference model', async () => {
+test('appearance settings and configurable shortcuts are wired to persistent preference models', async () => {
   const main = await readFile(new URL('../apps/desktop/src/main.tsx', import.meta.url), 'utf8');
-  const workspace = await readFile(new URL('../apps/desktop/src/control-center.tsx', import.meta.url), 'utf8');
-  assert.match(main, /CommandOrControl\+Shift\+BracketLeft/);
-  assert.match(main, /CommandOrControl\+Shift\+BracketRight/);
+  const settings = await readFile(new URL('../apps/desktop/src/desktop-settings.tsx', import.meta.url), 'utf8');
+  const shortcuts = await readFile(new URL('../apps/desktop/src/shortcuts.ts', import.meta.url), 'utf8');
   assert.match(main, /changeAssistantPreferences/);
-  assert.match(workspace, />Appearance<\/button>/);
-  assert.match(workspace, /Opacity changes the app UI only/);
-  assert.match(workspace, /Live assistant appearance preview/);
-  assert.match(workspace, /assistant-preview-alpha/);
-  assert.match(workspace, /onInput=\{\(event\) => onAssistantPreferencesChange/);
+  assert.match(settings, /Answer and appearance/);
+  assert.match(settings, /Window opacity/);
+  assert.match(settings, /assistant-preview-alpha/);
+  assert.match(settings, /onInput=\{\(event\) => onAssistantPreferencesChange/);
+  assert.match(shortcuts, /class ShortcutManager/);
+  assert.match(shortcuts, /duplicateShortcutActions/);
 });

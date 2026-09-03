@@ -1,6 +1,5 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import { register } from '@tauri-apps/plugin-global-shortcut';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { LogicalSize } from '@tauri-apps/api/dpi';
@@ -24,16 +23,23 @@ import {
   type AudioChunk,
   type SystemAudioBridge,
 } from './system-audio-bridge';
-import { ControlCenter, desktopApi, type DesktopAccount, type NativeSessionContext } from './control-center';
-import { AssistantOverlay } from './assistant-overlay';
+import { ControlCenter, type DesktopAccount, type NativeSessionContext } from './control-center';
+import { AssistantOverlay, type AssistantPanelState } from './assistant-overlay';
+import { desktopApi } from './desktop-api';
+import { ShortcutManager, type ShortcutConflict } from './shortcuts';
 import {
   DEFAULT_ASSISTANT_PREFERENCES,
+  DEFAULT_DESKTOP_PREFERENCES,
+  DEFAULT_SHORTCUT_PREFERENCES,
   MIN_ASSISTANT_OPACITY,
   WindowStateManager,
   clampAssistantOpacity,
   type AssistantPreferences,
   type AssistantSize,
+  type DesktopPreferences,
   type Density,
+  type ShortcutAction,
+  type ShortcutPreferences,
 } from './window-state';
 import './styles.css';
 import './audio-status.css';
@@ -173,6 +179,11 @@ function App() {
   const [copilotMode, setCopilotMode] = React.useState<InterviewMode>('general');
   const [clickThrough, setClickThrough] = React.useState(false);
   const [assistantPreferences, setAssistantPreferences] = React.useState<AssistantPreferences>(desktopPreview ? desktopPreviewPreferences : DEFAULT_ASSISTANT_PREFERENCES);
+  const [assistantPanelState, setAssistantPanelState] = React.useState<AssistantPanelState>('collapsed');
+  const [assistantFocusRequest, setAssistantFocusRequest] = React.useState(0);
+  const [shortcuts, setShortcuts] = React.useState<ShortcutPreferences>(DEFAULT_SHORTCUT_PREFERENCES);
+  const [shortcutConflicts, setShortcutConflicts] = React.useState<ShortcutConflict[]>([]);
+  const [desktopPreferences, setDesktopPreferences] = React.useState<DesktopPreferences>(DEFAULT_DESKTOP_PREFERENCES);
   const responseStyle = assistantPreferences.responseStyle;
   const [screenAnalysis, setScreenAnalysis] = React.useState('');
   const [screenAnalyzing, setScreenAnalyzing] = React.useState(false);
@@ -196,6 +207,7 @@ function App() {
   const partialQuestionTimerRef = React.useRef<number | null>(null);
   const activeSuggestionRef = React.useRef<ActiveSuggestion | null>(null);
   const windowStateRef = React.useRef<WindowStateManager | null>(null);
+  const shortcutManagerRef = React.useRef(new ShortcutManager());
   const pipelineMetricsRef = React.useRef<PipelineMetrics>({ source: 'manual' });
   const askRef = React.useRef<(nextQuestion?: string, responseMode?: 'tiny' | 'concise' | 'standard' | 'detailed', source?: PipelineMetrics['source']) => Promise<void>>(async () => undefined);
   const toggleRef = React.useRef<() => Promise<void>>(async () => undefined);
@@ -205,11 +217,17 @@ function App() {
   const reconnectTimersRef = React.useRef<Partial<Record<Channel, number>>>({});
   const reconnectAttemptRef = React.useRef<Record<Channel, number>>({ interviewer: 0, candidate: 0 });
   const assistantPreferencesRef = React.useRef<AssistantPreferences>(desktopPreview ? desktopPreviewPreferences : DEFAULT_ASSISTANT_PREFERENCES);
+  const shortcutsRef = React.useRef<ShortcutPreferences>(DEFAULT_SHORTCUT_PREFERENCES);
+  const focusModeRef = React.useRef(desktopPreviewFocus);
+  const panelStateRef = React.useRef<AssistantPanelState>('collapsed');
 
   React.useEffect(() => { contextRef.current = context; }, [context]);
   React.useEffect(() => { questionRef.current = question; }, [question]);
   React.useEffect(() => { segmentsRef.current = segments; }, [segments]);
   React.useEffect(() => { assistantPreferencesRef.current = assistantPreferences; }, [assistantPreferences]);
+  React.useEffect(() => { shortcutsRef.current = shortcuts; }, [shortcuts]);
+  React.useEffect(() => { focusModeRef.current = focusMode; }, [focusMode]);
+  React.useEffect(() => { panelStateRef.current = assistantPanelState; }, [assistantPanelState]);
 
   function updatePipelineMetrics(next: PipelineMetrics | ((current: PipelineMetrics) => PipelineMetrics)) {
     const value = typeof next === 'function' ? next(pipelineMetricsRef.current) : next;
@@ -622,34 +640,74 @@ function App() {
       setStatus(next ? 'Private Overlay on · hidden from supported capture paths (best effort)' : 'Private Overlay off · the copilot may appear in screen shares');
     } catch (error) { setStatus(`Private Overlay could not change: ${realtimeFailure(error)}`); }
   }
-  async function toggleFocusMode() {
-    const next = !focusMode;
+  async function resizeAssistant(panelState: AssistantPanelState, size = assistantPreferencesRef.current.assistantSize) {
+    if (desktopPreview) return;
+    const expandedSizes: Record<AssistantSize, [number, number]> = {
+      compact: [440, 390], standard: [500, 500], expanded: [560, 620],
+    };
+    const [width, height] = panelState === 'collapsed' ? [460, 58] : expandedSizes[size];
+    await getCurrentWindow().setSize(new LogicalSize(width, height));
+  }
+
+  async function setAssistantPanel(next: AssistantPanelState, focusPrompt = false) {
+    panelStateRef.current = next;
+    setAssistantPanelState(next);
+    if (focusModeRef.current) await resizeAssistant(next);
+    if (focusPrompt) {
+      setAssistantFocusRequest((value) => value + 1);
+      await getCurrentWindow().setFocus().catch(() => undefined);
+    }
+  }
+
+  async function toggleFocusMode(force?: boolean) {
+    const next = force ?? !focusModeRef.current;
+    if (next === focusModeRef.current) {
+      if (next) await setAssistantPanel(panelStateRef.current);
+      return;
+    }
     try {
       await windowStateRef.current?.switchMode(next ? 'focus' : 'normal');
       await invoke('configure_focus_mode', { enabled: next, clickThrough: next && clickThrough });
-      if (next) await resizeAssistant(assistantPreferencesRef.current.assistantSize);
+      if (next) await resizeAssistant(panelStateRef.current);
+      focusModeRef.current = next;
       setFocusMode(next);
       setStatus(next ? clickThrough ? 'Overlay on · click-through enabled · press ⌘⇧S to recover controls' : 'Overlay on · drag or resize it anywhere' : 'Overlay closed · workspace window restored');
     }
-    catch (error) { setFocusMode(false); setStatus(realtimeFailure(error)); }
+    catch (error) { focusModeRef.current = false; setFocusMode(false); setStatus(realtimeFailure(error)); }
   }
 
   async function openLiveOverlay() {
     setSurface('live');
-    if (!focusMode) await toggleFocusMode();
+    panelStateRef.current = 'collapsed';
+    setAssistantPanelState('collapsed');
+    await toggleFocusMode(true);
   }
 
   async function returnToWorkspace() {
-    if (focusMode) await toggleFocusMode();
+    if (focusModeRef.current) await toggleFocusMode(false);
     setSurface('workspace');
   }
 
-  async function resizeAssistant(next: AssistantSize) {
-    const sizes: Record<AssistantSize, [number, number]> = {
-      compact: [480, 310], standard: [620, 420], expanded: [780, 580],
-    };
-    const [width, height] = sizes[next];
-    await getCurrentWindow().setSize(new LogicalSize(width, height));
+  async function activateAssistant() {
+    await getCurrentWindow().show().catch(() => undefined);
+    if (!contextRef.current) {
+      setSurface('workspace');
+      await getCurrentWindow().setFocus().catch(() => undefined);
+      setStatus('Prepare a session to use the floating assistant');
+      return;
+    }
+    setSurface('live');
+    if (!focusModeRef.current) await toggleFocusMode(true);
+    await setAssistantPanel('collapsed', true);
+  }
+
+  function clearAssistantThread() {
+    cancelActiveSuggestion();
+    setQuestion('');
+    setPartial('');
+    setSuggestion(null);
+    setStreamingAnswer('');
+    setStatus('Assistant thread cleared');
   }
 
   function changeAssistantPreferences(patch: Partial<AssistantPreferences>) {
@@ -661,8 +719,8 @@ function App() {
     assistantPreferencesRef.current = next;
     setAssistantPreferences(next);
     void windowStateRef.current?.setAssistantPreferences(next);
-    if (patch.assistantSize && focusMode) {
-      void resizeAssistant(patch.assistantSize).catch((error) => setStatus(`The assistant could not resize: ${realtimeFailure(error)}`));
+    if (patch.assistantSize && focusModeRef.current && panelStateRef.current === 'expanded') {
+      void resizeAssistant('expanded', patch.assistantSize).catch((error) => setStatus(`The assistant could not resize: ${realtimeFailure(error)}`));
     }
   }
 
@@ -680,19 +738,53 @@ function App() {
     void windowStateRef.current?.setDensity(next);
   }
 
+  function changeDesktopPreferences(patch: Partial<DesktopPreferences>) {
+    setDesktopPreferences((current) => {
+      const next = { ...current, ...patch };
+      void windowStateRef.current?.setDesktopPreferences(next);
+      return next;
+    });
+  }
+
+  function changeShortcut(action: ShortcutAction, shortcut: string) {
+    setShortcuts((current) => {
+      const next = { ...current, [action]: shortcut };
+      shortcutsRef.current = next;
+      void windowStateRef.current?.setShortcutPreferences(next);
+      return next;
+    });
+  }
+
+  function resetShortcuts() {
+    shortcutsRef.current = DEFAULT_SHORTCUT_PREFERENCES;
+    setShortcuts(DEFAULT_SHORTCUT_PREFERENCES);
+    void windowStateRef.current?.setShortcutPreferences(DEFAULT_SHORTCUT_PREFERENCES);
+    setStatus('Keyboard shortcuts restored to defaults');
+  }
+
+  function resetWindowPosition() {
+    void windowStateRef.current?.resetPosition(desktopPreferences.preferredMonitor)
+      .then(() => setStatus('Torvi moved to the selected display'))
+      .catch((error) => setStatus(`Window position could not reset: ${realtimeFailure(error)}`));
+  }
+
   React.useEffect(() => { toggleRef.current = toggleCapture; askRef.current = askCoach; focusRef.current = toggleFocusMode; layerRef.current = moveAnswerLayer; opacityRef.current = adjustAssistantOpacity; });
   React.useEffect(() => {
     if (desktopPreview) return;
     const windowState = new WindowStateManager();
     windowStateRef.current = windowState;
-    void windowState.init().then(({ mode, density: savedDensity, preferences }) => {
+    void windowState.init().then(({ mode, density: savedDensity, preferences, shortcuts: savedShortcuts, desktopPreferences: savedDesktopPreferences }) => {
       setDensity(savedDensity);
       assistantPreferencesRef.current = preferences;
       setAssistantPreferences(preferences);
+      shortcutsRef.current = savedShortcuts;
+      setShortcuts(savedShortcuts);
+      setDesktopPreferences(savedDesktopPreferences);
+      focusModeRef.current = mode === 'focus';
       setFocusMode(mode === 'focus');
       return Promise.all([
         invoke('configure_focus_mode', { enabled: mode === 'focus', clickThrough: mode === 'focus' && clickThrough }),
-        mode === 'focus' ? resizeAssistant(preferences.assistantSize) : Promise.resolve(),
+        mode === 'focus' ? resizeAssistant(panelStateRef.current, preferences.assistantSize) : Promise.resolve(),
       ]);
     }).catch(() => setStatus('Window state could not be restored; resizing still works normally.'));
     const restoreTimer = window.setTimeout(() => { if (!desktopPreview) void restoreConnection(); }, 0); const audioStatusTimer = window.setTimeout(() => { if (!desktopPreview) void refreshSystemAudio(); }, 0);
@@ -705,22 +797,44 @@ function App() {
       if (event.altKey && event.key === 'ArrowLeft') { event.preventDefault(); layerRef.current(-1); }
       if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.code === 'BracketLeft') { event.preventDefault(); opacityRef.current(-5); }
       if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.code === 'BracketRight') { event.preventDefault(); opacityRef.current(5); }
+      if (event.key === 'Escape' && focusModeRef.current) {
+        event.preventDefault();
+        if (panelStateRef.current === 'expanded') void setAssistantPanel('collapsed');
+        else void hideWindow();
+      }
     };
     window.addEventListener('focus', handleWindowFocus); window.addEventListener('online', handleOnline); window.addEventListener('offline', handleOffline); window.addEventListener('keydown', handleKeys); navigator.mediaDevices?.addEventListener('devicechange', handleDevices);
     let disposed = false; const cleanup: Array<() => void> = [];
     Promise.all([
-      register('CommandOrControl+Shift+I', () => void toggleRef.current()), register('CommandOrControl+Enter', () => void askRef.current()),
-      register('CommandOrControl+Shift+H', () => void hideWindow()), register('CommandOrControl+Shift+S', () => void focusRef.current()),
-      register('CommandOrControl+Shift+BracketLeft', () => opacityRef.current(-5)), register('CommandOrControl+Shift+BracketRight', () => opacityRef.current(5)),
       listen<AudioChunk>('native-audio-chunk', ({ payload }) => { if (disposed || !activeRef.current) return; lastNativeAudioAtRef.current = eventTimestamp(); const samples = decodeAudioChunk(payload); const nextLevel = chunkLevel(samples); setLevel(nextLevel); if (nextLevel > 0.015) { setSourceVerified(true); setStatus('System audio verified — listening for questions'); } if (systemAudioBridgeRef.current && !systemAudioBridgeRef.current.push(samples, payload.sampleRate)) setDroppedChunks((value) => value + 1); }).then((unlisten) => cleanup.push(unlisten)),
       listen<SystemAudioFailure>('native-audio-error', ({ payload }) => { if (!disposed) void stopCapture(payload.message || 'System audio capture stopped.', payload); }).then((unlisten) => cleanup.push(unlisten)),
       listen<SuggestionChunk>('desktop-suggestion-chunk', ({ payload }) => { const current = activeSuggestionRef.current; if (!disposed && current?.requestId === payload.requestId) current.parser.feed(payload.bytes, (event) => handleSuggestionStreamEvent({ ...event, requestId: payload.requestId })); }).then((unlisten) => cleanup.push(unlisten)),
-    ]).catch(() => setStatus('A desktop shortcut could not register. Every action remains available on screen.'));
+    ]).catch(() => setStatus('A native event listener could not start. Restart Torvi to try again.'));
     void invoke('configure_share_safe_overlay', { enabled: false });
     return () => { window.clearTimeout(restoreTimer); window.clearTimeout(audioStatusTimer); if (partialQuestionTimerRef.current != null) window.clearTimeout(partialQuestionTimerRef.current); cancelActiveSuggestion(); window.removeEventListener('focus', handleWindowFocus); window.removeEventListener('online', handleOnline); window.removeEventListener('offline', handleOffline); window.removeEventListener('keydown', handleKeys); navigator.mediaDevices?.removeEventListener('devicechange', handleDevices); disposed = true; cleanup.forEach((dispose) => dispose()); void windowState.dispose(); void stopCapture(); };
     // Native listeners are installed once; current values are held in refs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  React.useEffect(() => {
+    if (desktopPreview) return;
+    let disposed = false;
+    const shortcutManager = shortcutManagerRef.current;
+    void shortcutManager.update(shortcuts, {
+      toggleAssistant: () => { void activateAssistant(); },
+      toggleListening: () => { void toggleRef.current(); },
+      hideAssistant: () => { void hideWindow(); },
+      toggleOverlay: () => { void focusRef.current(); },
+      clearThread: clearAssistantThread,
+      captureContext: () => { setScreenContextEnabled(true); setStatus('Screen context enabled for the next request'); void activateAssistant(); },
+    }).then((conflicts) => {
+      if (disposed) return;
+      setShortcutConflicts(conflicts);
+      if (conflicts.length) setStatus(`${conflicts.length} keyboard shortcut${conflicts.length === 1 ? '' : 's'} could not be registered. Change them in Settings.`);
+    });
+    return () => { disposed = true; void shortcutManager.dispose(); };
+    // Actions are routed through refs where they need the latest live-session state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shortcuts]);
   React.useEffect(() => { if (!active) return; const interval = window.setInterval(() => setSeconds((value) => value + 1), 1_000); return () => window.clearInterval(interval); }, [active]);
   React.useEffect(() => { if (!context) return; const timer = window.setTimeout(() => void loadSessionIntelligence(context), 0); return () => window.clearTimeout(timer); }, [context]);
 
@@ -753,13 +867,17 @@ function App() {
   return <main className={`app-frame surface-${surface} density-${density} appearance-${assistantPreferences.appearanceMode} ${focusMode ? 'focus-mode' : ''} ${privateOverlay ? 'private-overlay' : ''}`} style={frameStyle}>
     <header className="global-titlebar window-drag-region" onMouseDown={startWindowDrag}><div className="mark"><i /><i /><i /></div><div className="global-brand"><b>Torvi</b><span>{surface === 'live' && context ? `${context.target?.role ?? statusCopy(context.session.mode)}${context.target?.company ? ` · ${context.target.company}` : ''}` : `Native workspace · v${desktopAppVersion}`}</span></div>{surface === 'live' && <div className={`live-status ${active ? 'active' : ''} ${online ? '' : 'offline'}`}><i />{status}</div>}<div className="window-actions" data-no-drag>{surface === 'live' && <button onClick={() => void returnToWorkspace()}>Workspace</button>}{surface === 'live' && <button className={focusMode ? 'active' : ''} title="Overlay (⌘⇧S)" onClick={() => void toggleFocusMode()}>Overlay</button>}<button title="Hide (⌘⇧H)" onClick={() => void hideWindow()}>Hide</button><button className="quit" disabled={finishing} title="Quit (⌘Q)" onClick={quitApp}>Quit</button></div></header>
 
-    {surface === 'workspace' ? <ControlCenter account={account} activeContext={context} appVersion={desktopAppVersion} preview={desktopPreview} assistantPreferences={assistantPreferences} onAssistantPreferencesChange={changeAssistantPreferences} onResetAssistantAppearance={resetAssistantAppearance} onAuthenticated={setAccount} onOpenLive={() => context && void openLiveOverlay()} onSessionPrepared={(next) => { setContext(next); setCopilotMode(next.session.mode); setSegments([]); setSuggestion(null); setStreamingAnswer(''); setQuestion('Ask anything about your screen or conversation…'); void openLiveOverlay(); }} onSignOut={signOut} setStatus={setStatus} /> : context ? <section className={`live-workspace ${isConversationMode ? 'conversation-workspace' : 'interview-workspace'}`}>
+    {surface === 'workspace' ? <ControlCenter account={account} activeContext={context} appVersion={desktopAppVersion} preview={desktopPreview} assistantPreferences={assistantPreferences} desktopPreferences={desktopPreferences} shortcuts={shortcuts} shortcutConflicts={shortcutConflicts} onAssistantPreferencesChange={changeAssistantPreferences} onDesktopPreferencesChange={changeDesktopPreferences} onShortcutChange={changeShortcut} onResetShortcuts={resetShortcuts} onResetWindowPosition={resetWindowPosition} onResetAssistantAppearance={resetAssistantAppearance} onAuthenticated={setAccount} onOpenLive={() => context && void openLiveOverlay()} onSessionPrepared={(next) => { setContext(next); setCopilotMode(next.session.mode); setSegments([]); setSuggestion(null); setStreamingAnswer(''); setQuestion('Ask anything about your screen or conversation…'); void openLiveOverlay(); }} onSignOut={signOut} setStatus={setStatus} /> : context ? <section className={`live-workspace ${isConversationMode ? 'conversation-workspace' : 'interview-workspace'}`}>
       {focusMode && <AssistantOverlay
+        panelState={assistantPanelState}
+        focusRequest={assistantFocusRequest}
+        shortcut={shortcuts.toggleAssistant}
         active={active}
         online={online}
         mode={copilotMode}
         question={partial || question}
         questionIsLive={Boolean(partial)}
+        prompt={question}
         suggestion={suggestion}
         streamingAnswer={streamingAnswer}
         loading={suggestionLoading}
@@ -769,15 +887,19 @@ function App() {
         captureActionKind={captureActionKind}
         captureBusy={captureBusy}
         preferences={assistantPreferences}
+        onPanelChange={(next, focusPrompt) => { void setAssistantPanel(next, focusPrompt); }}
+        onPromptChange={(value) => { setPartial(''); setQuestion(value); }}
+        onSubmit={(value) => { setQuestion(value); void askCoach(value); }}
+        onQuickAction={(value) => { setQuestion(value); void askCoach(value); }}
+        onClear={clearAssistantThread}
         onPreferencesChange={changeAssistantPreferences}
         onResetAppearance={resetAssistantAppearance}
         onToggleListening={() => void runCapturePrimaryAction()}
-        onAsk={() => void askCoach()}
         onShorter={() => { chooseAnswerLayer('five'); void askCoach(partial || question, 'tiny'); }}
         onExpand={() => { chooseAnswerLayer('sixty'); void askCoach(partial || question, 'detailed'); }}
         onFollowUp={() => { const next = suggestion?.likelyFollowUps[0]?.question ?? 'What is the most likely follow-up question?'; setQuestion(next); void askCoach(next, 'concise'); }}
         onHide={() => void hideWindow()}
-        onClose={() => void toggleFocusMode()}
+        onClose={() => void returnToWorkspace()}
         onDragStart={startWindowDrag}
       />}
       <div className="live-context"><div><span>{isMeeting ? 'Meeting' : 'Live session'}</span><b>{context.target?.role ?? statusCopy(context.session.mode)}{context.target?.company ? ` at ${context.target.company}` : ''}</b></div><div><span>Mode</span><b>{statusCopy(copilotMode)}</b></div><div><span>Context</span><b>{sources} sources · {brain?.brain.verifiedMemory.length ?? 0} verified memories</b></div><time>{String(Math.floor(seconds / 60)).padStart(2, '0')}:{String(seconds % 60).padStart(2, '0')}</time></div>
