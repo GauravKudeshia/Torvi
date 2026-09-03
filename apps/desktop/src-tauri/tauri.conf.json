@@ -1,0 +1,67 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Torvi",
+  "version": "0.6.1",
+  "identifier": "com.interviewcopilot.desktop",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "node_modules/.bin/tsc && node_modules/.bin/vite build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [{
+      "label": "main",
+      "title": "Torvi",
+      "width": 880,
+      "height": 720,
+      "minWidth": 420,
+      "minHeight": 92,
+      "resizable": true,
+      "transparent": true,
+      "decorations": true,
+      "titleBarStyle": "Overlay",
+      "hiddenTitle": true,
+      "trafficLightPosition": { "x": 16, "y": 18 },
+      "acceptFirstMouse": true,
+      "alwaysOnTop": false,
+      "skipTaskbar": false,
+      "visibleOnAllWorkspaces": true,
+      "contentProtected": false
+    }],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' https://api.interviewcopilot.example wss://api.openai.com https://api.openai.com; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg", "nsis", "msi"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "../native/macos/ic-screencapturekit": "ic-screencapturekit"
+    },
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "entitlements": "Entitlements.plist",
+      "hardenedRuntime": true
+    },
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "http://timestamp.digicert.com"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": ["https://releases.interviewcopilot.example/{{target}}/{{arch}}/{{current_version}}"],
+      "pubkey": "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY"
+    }
+  }
+}

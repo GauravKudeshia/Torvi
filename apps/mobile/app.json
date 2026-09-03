@@ -1,0 +1,44 @@
+{
+  "expo": {
+    "name": "Torvi",
+    "slug": "interview-copilot",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "interviewcopilot",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.interviewcopilot.app",
+      "deploymentTarget": "17.0",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Torvi uses room audio only while you visibly run a coaching session.",
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "com.interviewcopilot.app",
+      "minSdkVersion": 31,
+      "permissions": ["RECORD_AUDIO", "MODIFY_AUDIO_SETTINGS"],
+      "blockedPermissions": ["android.permission.READ_PHONE_STATE", "android.permission.PROCESS_OUTGOING_CALLS"]
+    },
+    "plugins": [
+      "expo-secure-store",
+      [
+        "@config-plugins/react-native-webrtc",
+        {
+          "cameraPermission": false,
+          "microphonePermission": "Torvi uses room audio only while you visibly run a coaching session."
+        }
+      ]
+    ],
+    "extra": {
+      "apiUrl": "https://api.interviewcopilot.example",
+      "auth0Domain": "",
+      "auth0ClientId": "",
+      "auth0Audience": "",
+      "revenueCatAppleKey": "",
+      "revenueCatGoogleKey": "",
+      "eas": { "projectId": "REPLACE_WITH_EAS_PROJECT_ID" }
+    }
+  }
+}

@@ -1,0 +1,27 @@
+.window-drag-region {
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.window-drag-region:active {
+  cursor: grabbing;
+}
+
+.window-drag-region button,
+.window-drag-region input,
+.window-drag-region select,
+.window-drag-region textarea,
+.window-drag-region a,
+.window-drag-region summary,
+.window-drag-region [data-no-drag] {
+  cursor: default;
+  user-select: auto;
+  -webkit-user-select: auto;
+}
+
+.window-drag-region button,
+.window-drag-region a,
+.window-drag-region summary {
+  cursor: pointer;
+}

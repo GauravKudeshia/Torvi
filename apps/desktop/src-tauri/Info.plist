@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Torvi uses the microphone only during a session you explicitly start so it can label and transcribe your side of the conversation.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>Torvi captures system audio only during a session you explicitly start so it can transcribe interview questions from apps such as Chrome, Zoom, Teams, Meet, and Webex.</string>
+</dict>
+</plist>

@@ -1,0 +1,73 @@
+.source-health.state-permissionRequired,
+.source-health.state-restartRequired {
+  border-color: #ddc885;
+  background: #fffbec;
+}
+
+.source-health.state-captureFailed {
+  border-color: #e3b3ae;
+  background: #fff4f2;
+}
+
+.source-health.state-captureFailed > div:first-child b {
+  color: #9c403c;
+}
+
+.permission-action {
+  margin-top: 9px;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 7px;
+  background: #18243d;
+  color: white;
+  font-size: 8px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.permission-action.secondary {
+  border: 1px solid #d6ddd0;
+  background: white;
+  color: #53606b;
+}
+
+.audio-diagnostics {
+  margin-top: 9px;
+  padding-top: 7px;
+  border-top: 1px solid #dfe5da;
+  color: #737e86;
+  font-size: 8px;
+}
+
+.audio-diagnostics summary {
+  cursor: pointer;
+  color: #66717a;
+  font-weight: 800;
+}
+
+.audio-diagnostics dl {
+  display: grid;
+  gap: 4px;
+  margin: 7px 0 0;
+}
+
+.audio-diagnostics dl div {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr);
+  gap: 6px;
+}
+
+.audio-diagnostics dt {
+  color: #939b9f;
+}
+
+.audio-diagnostics dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #515d67;
+}
+
+.compact .audio-diagnostics {
+  display: none;
+}
