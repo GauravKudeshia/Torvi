@@ -2,8 +2,8 @@
   --hud-surface-rgb: 18, 19, 22;
   --hud-elevated-rgb: 29, 30, 34;
   --hud-text: #f3f4f6;
-  --hud-muted: #92969f;
-  --hud-faint: #6f737b;
+  --hud-muted: #b0b6c2;
+  --hud-faint: #9aa3b3;
   --hud-border: rgba(255, 255, 255, .09);
   --hud-border-strong: rgba(255, 255, 255, .15);
   --hud-hover: rgba(255, 255, 255, .07);
@@ -453,3 +453,14 @@
   .assistant-collapsed .hud-shortcut-hint,
   .assistant-collapsed .hud-collapse-listen { display: none; }
 }
+
+/* Contextual controls stay inside the assistant instead of competing at rest. */
+.hud-quick-actions details { flex: 1; min-width: 62px; }
+.hud-quick-actions summary { cursor: pointer; padding: 8px 10px; color: var(--hud-muted); font-size: 12px; }
+.hud-quick-actions details[open] { flex-basis: 100%; }
+.hud-quick-actions details[open] button { margin: 4px; }
+.hud-cancel { align-self: flex-start; padding: 6px 10px; }
+.hud-body { overflow-y: auto; min-height: 0; }
+.hud-footer { flex-wrap: wrap; }
+.hud-status.attention { gap: 10px; }
+.hud-status.attention button { white-space: nowrap; }

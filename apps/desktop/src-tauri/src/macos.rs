@@ -20,7 +20,7 @@ extern "C" {
     fn CGRequestScreenCaptureAccess() -> bool;
 }
 
-fn preflight_granted() -> bool {
+pub fn preflight_granted() -> bool {
     // This check never opens a macOS prompt. Permission requests are only made
     // by request_permission after the user presses the visible Grant button.
     unsafe { CGPreflightScreenCaptureAccess() }
@@ -211,20 +211,19 @@ pub fn request_permission(app: &tauri::AppHandle) -> SystemAudioStatus {
         json!({ "initiatedBy": "explicit-user-action" }),
     );
     let granted = unsafe { CGRequestScreenCaptureAccess() };
-    // CGRequestScreenCaptureAccess can remain false in the process that was
-    // already running when the user enabled the toggle in System Settings.
-    // A fresh process is the only reliable verification step, so never leave
-    // the UI in a loop that keeps offering the Grant action.
-    RESTART_REQUIRED.store(true, Ordering::SeqCst);
+    // A denied request is not evidence that a restart will fix permission.
+    // Offer settings without forcing the user into a restart/deny loop.
     if granted {
+        RESTART_REQUIRED.store(true, Ordering::SeqCst);
         set_stage("permission-granted-restart-required");
     } else {
-        set_stage("permission-change-restart-required");
+        RESTART_REQUIRED.store(false, Ordering::SeqCst);
+        set_stage("permission-not-granted-open-settings");
     }
     log_event(
         app,
         "permission-request-finished",
-        json!({ "grantedInCurrentProcess": granted, "restartRequired": true }),
+        json!({ "grantedInCurrentProcess": granted, "restartRequired": RESTART_REQUIRED.load(Ordering::SeqCst) }),
     );
     status(app, false)
 }
@@ -600,8 +599,21 @@ pub fn stop() -> Result<(), String> {
         .map_err(|_| "Capture state is unavailable.")?
         .take()
     {
-        child.kill().map_err(|error| error.to_string())?;
+        let _ = child.kill();
+        let _ = child.wait();
     }
     set_stage("stopped");
     Ok(())
+}
+
+pub fn capture_screen(app: &tauri::AppHandle, display_id: Option<u32>) -> Result<crate::ScreenContextImage, String> {
+    if !preflight_granted() { return Err("Screen Recording permission is denied. Open Settings → Audio & system check to enable access.".into()); }
+    let helper = app.path().resource_dir().map_err(|error| error.to_string())?.join("ic-screencapturekit");
+    let mut command = Command::new(helper);
+    command.arg("--screenshot").arg(format!("--exclude-pid={}", std::process::id()));
+    if let Some(id) = display_id { command.arg(format!("--display-id={id}")); }
+    let output = command.output().map_err(|error| format!("Screen capture could not start: {error}"))?;
+    if !output.status.success() { return Err(format!("Screen capture failed: {}", String::from_utf8_lossy(&output.stderr))); }
+    if output.stdout.is_empty() || output.stdout.len() > 5 * 1024 * 1024 { return Err("Screen capture returned an invalid image size.".into()); }
+    Ok(crate::ScreenContextImage { bytes: output.stdout, content_type: "image/jpeg" })
 }

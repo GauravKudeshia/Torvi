@@ -103,6 +103,8 @@ export function SessionHistory({ sessions, reports, initialSessionId, onSelectSe
   onSelectSession: (sessionId: string) => void;
   onStart: () => void;
 }) {
+  const requestSequence = React.useRef(0);
+  React.useEffect(() => () => { requestSequence.current += 1; }, []);
   const [filter, setFilter] = React.useState<SessionFilter>('all');
   const [query, setQuery] = React.useState('');
   const [selectedId, setSelectedId] = React.useState(initialSessionId ?? sessions[0]?.id ?? '');
@@ -121,13 +123,17 @@ export function SessionHistory({ sessions, reports, initialSessionId, onSelectSe
 
   const loadDetail = React.useCallback(async (sessionId: string) => {
     if (!sessionId) return;
+    const request = ++requestSequence.current;
+    setDetail(null);
     setDetailState('loading');
     setDetailError('');
     try {
       const result = await desktopApi<SessionDetail>('GET', `/api/v1/sessions/${sessionId}/history`);
+      if (request !== requestSequence.current) return;
       setDetail(result);
       setDetailState('ready');
     } catch (error) {
+      if (request !== requestSequence.current) return;
       setDetail(null);
       setDetailState('error');
       setDetailError(error instanceof Error ? error.message : String(error));
@@ -137,7 +143,7 @@ export function SessionHistory({ sessions, reports, initialSessionId, onSelectSe
   React.useEffect(() => {
     if (!selectedId) return;
     const timer = window.setTimeout(() => void loadDetail(selectedId), 0);
-    return () => window.clearTimeout(timer);
+    return () => { requestSequence.current += 1; window.clearTimeout(timer); };
   }, [selectedId, loadDetail]);
 
   const filtered = React.useMemo(() => {
@@ -159,6 +165,9 @@ export function SessionHistory({ sessions, reports, initialSessionId, onSelectSe
   }, [detail?.transcript, transcriptQuery]);
 
   function selectSession(sessionId: string) {
+    if (sessionId === selectedId) return;
+    requestSequence.current += 1;
+    setDetail(null); setDetailState('loading');
     setSelectedId(sessionId);
     setTab('summary');
     setTranscriptQuery('');

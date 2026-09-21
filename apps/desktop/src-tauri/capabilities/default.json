@@ -12,7 +12,8 @@
     "global-shortcut:allow-register",
     "global-shortcut:allow-unregister",
     "store:default",
-    "updater:default",
+    "core:window:allow-show",
+    "core:window:allow-set-focus",
     "opener:default"
   ]
 }

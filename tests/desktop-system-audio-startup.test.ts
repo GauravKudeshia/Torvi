@@ -23,13 +23,14 @@ test('Start never triggers the macOS permission prompt implicitly', async () => 
   assert.match(start, /SystemAudioState::PermissionRequired/);
 });
 
-test('A permission request always transitions to a real process relaunch', async () => {
+test('A granted permission can relaunch, while denial does not force a restart loop', async () => {
   const native = await readFile(new URL('../apps/desktop/src-tauri/src/macos.rs', import.meta.url), 'utf8');
   const shell = await readFile(new URL('../apps/desktop/src-tauri/src/lib.rs', import.meta.url), 'utf8');
   const desktop = await readFile(new URL('../apps/desktop/src/main.tsx', import.meta.url), 'utf8');
   const request = native.slice(native.indexOf('pub fn request_permission'), native.indexOf('fn failure('));
   assert.match(request, /RESTART_REQUIRED\.store\(true/);
-  assert.match(request, /"restartRequired": true/);
+  assert.match(request, /permission-not-granted-open-settings/);
+  assert.match(request, /RESTART_REQUIRED\.store\(false/);
   assert.match(shell, /fn relaunch_desktop/);
   assert.match(shell, /app\.restart\(\)/);
   assert.match(desktop, /invoke\('relaunch_desktop'\)/);

@@ -62,14 +62,25 @@ export function duplicateShortcutActions(shortcuts: ShortcutPreferences) {
 }
 
 export class ShortcutManager {
+  constructor(private readonly bindings: {
+    register: (shortcut: string, handler: (event: ShortcutEvent) => void) => Promise<void>;
+    unregister: (shortcuts: string[]) => Promise<void>;
+  } = { register, unregister }) {}
   private registered: string[] = [];
+  private queue: Promise<unknown> = Promise.resolve();
 
-  async update(shortcuts: ShortcutPreferences, handlers: ShortcutHandlers) {
-    await this.dispose();
+  update(shortcuts: ShortcutPreferences, handlers: ShortcutHandlers) {
+    const result = this.queue.then(() => this.replace(shortcuts, handlers));
+    this.queue = result.catch(() => undefined);
+    return result;
+  }
+
+  private async replace(shortcuts: ShortcutPreferences, handlers: ShortcutHandlers) {
+    await this.unregisterCurrent();
     const conflicts: ShortcutConflict[] = [];
     for (const [action, shortcut] of Object.entries(shortcuts) as Array<[ShortcutAction, string]>) {
       try {
-        await register(shortcut, (event: ShortcutEvent) => {
+        await this.bindings.register(shortcut, (event: ShortcutEvent) => {
           if (event.state === 'Pressed') handlers[action]();
         });
         this.registered.push(shortcut);
@@ -84,9 +95,15 @@ export class ShortcutManager {
     return conflicts;
   }
 
-  async dispose() {
+  dispose() {
+    const result = this.queue.then(() => this.unregisterCurrent());
+    this.queue = result.catch(() => undefined);
+    return result;
+  }
+
+  private async unregisterCurrent() {
     const current = [...new Set(this.registered)];
     this.registered = [];
-    if (current.length) await unregister(current).catch(() => undefined);
+    if (current.length) await this.bindings.unregister(current).catch(() => undefined);
   }
 }

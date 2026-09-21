@@ -21,7 +21,7 @@ test('desktop window keeps native controls, custom drag regions, resizing, and w
   const capabilities = await readFile(new URL('../apps/desktop/src-tauri/capabilities/default.json', import.meta.url), 'utf8');
   const native = await readFile(new URL('../apps/desktop/src-tauri/src/lib.rs', import.meta.url), 'utf8');
   const windowState = await readFile(new URL('../apps/desktop/src/window-state.ts', import.meta.url), 'utf8');
-  assert.match(config, /"decorations": true/);
+  assert.match(config, /"decorations": false/);
   assert.match(config, /"titleBarStyle": "Overlay"/);
   assert.match(config, /"resizable": true/);
   assert.match(ui, /className="[^"]*window-drag-region[^"]*" onMouseDown={startWindowDrag}/);

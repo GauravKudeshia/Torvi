@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import { EB_Garamond, Geist } from 'next/font/google';
 import './globals.css';
 import './experience.css';
+import './workspace.css';
 
 const display = EB_Garamond({ variable: '--font-display', subsets: ['latin'], display: 'swap' });
 const body = Geist({ variable: '--font-body', subsets: ['latin'], display: 'swap' });

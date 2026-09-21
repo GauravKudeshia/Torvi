@@ -10,7 +10,8 @@ test('floating assistant has compact and expanded states with a keyboard-first c
   assert.match(overlay, /Summarize/);
   assert.match(overlay, /Key points/);
   assert.match(overlay, /Action items/);
-  assert.match(overlay, /event\.metaKey \|\| event\.ctrlKey/);
+  assert.match(overlay, /event\.key === 'Enter'/);
+  assert.match(main, /toggleAssistant:.*askOrOpenAssistant/);
   assert.match(main, /panelState === 'collapsed' \? \[460, 58\]/);
   assert.match(main, /event\.key === 'Escape'/);
 });

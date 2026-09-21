@@ -38,7 +38,7 @@ export async function POST(request: Request) {
     }
     const target = await db.select().from(jobTargets).where(eq(jobTargets.id, input.jobTargetId)).limit(1);
     if (!target[0] || target[0].userId !== actor.userId) throw new ApiError(404, 'job_target_not_found', 'Job target not found.');
-    if (!target[0].company?.trim()) throw new ApiError(422, 'company_required', 'Add an organization, team, or company before starting.');
+    if (modeRequiresVerifiedResume(input.mode) && !target[0].company?.trim()) throw new ApiError(422, 'company_required', 'Add the interview company before starting.');
 
     const documentIds = [...new Set(input.documentIds)];
     if (documentIds.length !== input.documentIds.length) throw new ApiError(422, 'duplicate_documents', 'Each context document can only be attached once.');

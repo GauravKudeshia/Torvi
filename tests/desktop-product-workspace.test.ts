@@ -8,7 +8,7 @@ test('desktop keeps the full product workspace available when a session is resto
   assert.match(main, /type Surface = 'workspace' \| 'live'/);
   assert.match(main, /setSurface\('workspace'\)/);
   assert.match(main, /activeContext=\{context\}/);
-  for (const surface of ['Home', 'Opportunities', 'Career Memory', 'Practice', 'Sessions', 'Career Tools', 'Settings']) {
+  for (const surface of ['Home', 'Opportunities', 'Your context', 'Practice', 'Sessions', 'Career Tools', 'Settings']) {
     assert.match(workspace, new RegExp(`label: '${surface}'`));
   }
 });
@@ -27,10 +27,10 @@ test('live workspace exposes progressive answers, transcript controls, one-click
   const main = await readFile(new URL('../apps/desktop/src/main.tsx', import.meta.url), 'utf8');
   for (const label of ['5 sec', '20 sec', '60 sec', 'Go deeper']) assert.match(main, new RegExp(label));
   assert.match(main, /capture_primary_screen/);
-  assert.match(main, /Screen \{screenContextEnabled \? 'on' : 'off'\}/);
+  assert.match(main, /Use screen on Ask/);
   assert.match(main, /Private Overlay on/);
   assert.match(main, /Live transcript/);
-  assert.match(main, /Save notes/);
+  assert.match(main, /End and save notes/);
   assert.match(main, /desktop_finish/);
   assert.match(main, /desktop_screen_context/);
 });

@@ -57,7 +57,8 @@ const sectionItems: Array<{ id: SettingsSection; label: string; icon: typeof Set
 const shortcutLabels: Record<ShortcutAction, { title: string; detail: string }> = {
   toggleAssistant: { title: 'Open assistant', detail: 'Reveal the floating bar and focus its composer.' },
   toggleListening: { title: 'Start or stop listening', detail: 'Toggle live audio for the current session.' },
-  hideAssistant: { title: 'Hide assistant', detail: 'Hide Torvi without ending the session.' },
+  hideAssistant: { title: 'Show / hide assistant', detail: 'Hide Torvi without ending the session.' },
+  dismissAssistant: { title: 'Collapse assistant', detail: 'Dismiss the response panel from any app.' },
   toggleOverlay: { title: 'Toggle floating mode', detail: 'Move between the workspace and floating assistant.' },
   clearThread: { title: 'Clear current thread', detail: 'Clear the visible question and answer without deleting the saved session.' },
   captureContext: { title: 'Capture screen context', detail: 'Read the screen once on the next request when enabled.' },

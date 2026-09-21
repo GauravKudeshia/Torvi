@@ -21,8 +21,8 @@ fn client() -> Result<Client, String> {
     }
     Client::builder()
         .connect_timeout(Duration::from_secs(8))
-        .timeout(Duration::from_secs(20))
-        .user_agent("Torvi-Mac/0.6.1")
+        .timeout(Duration::from_secs(55))
+        .user_agent("Torvi-Mac/0.7.0")
         .build()
         .map_err(|_| "Secure networking could not initialize.".to_string())
 }

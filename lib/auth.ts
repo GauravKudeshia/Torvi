@@ -1,5 +1,5 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { getDb } from '@/db';
 import { entitlements, profiles, users } from '@/db/schema';
 import { ApiError } from './http';
@@ -55,8 +55,10 @@ async function ensureUser(identity: Omit<Actor, 'userId'>): Promise<Actor> {
       createdAt: now,
       updatedAt: now,
     }).onConflictDoNothing(),
-    db.insert(profiles).values({ userId, updatedAt: now }).onConflictDoNothing(),
-    db.insert(entitlements).values({ userId, updatedAt: now }).onConflictDoNothing(),
+    // A concurrent first request may win the unique auth_subject insert.
+    // Resolve the canonical ID inside this transaction, never use the losing UUID.
+    db.insert(profiles).values({ userId: sql`(SELECT id FROM users WHERE auth_subject = ${identity.subject})`, updatedAt: now }).onConflictDoNothing(),
+    db.insert(entitlements).values({ userId: sql`(SELECT id FROM users WHERE auth_subject = ${identity.subject})`, updatedAt: now }).onConflictDoNothing(),
   ]);
   const created = await db.select({ id: users.id }).from(users).where(eq(users.authSubject, identity.subject)).limit(1);
   if (!created[0]) throw new ApiError(500, 'user_provision_failed', 'The account could not be provisioned.');

@@ -937,3 +937,12 @@
   .settings-layout > nav { background: var(--surface); }
   .settings-layout > nav button.active { color: #203018; background: var(--lime); box-shadow: none; }
 }
+
+.native-home-start { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 24px; border: 1px solid var(--border, #2b303a); border-radius: 14px; background: #17191f; }
+.native-home-start h2 { margin: 0 0 8px; font-size: 22px; }
+.native-home-start p { margin: 0; color: #adb4c2; font-size: 14px; }
+.native-home-start > button { min-height: 44px; padding: 10px 20px; border-radius: 9px; color: #121824; background: #e5ecfa; }
+.native-home-more { margin: 20px 0; color: #adb4c2; }
+.native-home-more summary { cursor: pointer; padding: 12px 0; font-size: 14px; }
+.native-home-more button { padding: 10px 16px; }
+@media(max-width: 720px) { .native-home-start { flex-direction: column; align-items: flex-start; } }

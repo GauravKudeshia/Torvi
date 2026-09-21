@@ -4,56 +4,43 @@ set -euo pipefail
 script_directory="${0:A:h}"
 desktop_directory="${script_directory:h}"
 project_directory="${desktop_directory:h:h}"
-source_app="${project_directory}/Torvi.app"
+source_app="${desktop_directory}/src-tauri/target/release/bundle/macos/Torvi.app"
 installed_app="/Applications/Torvi.app"
-legacy_app="/Applications/Live Copilot.app"
 backup_directory="${project_directory}/replaced-mac-apps"
 backup_suffix="$(/bin/date '+%Y%m%d-%H%M%S')"
 
 if [[ ! -d "$source_app" ]]; then
-  echo "Current Torvi bundle not found: ${source_app}" >&2
+  echo "Build Torvi first. Current bundle not found: ${source_app}" >&2
+  exit 1
+fi
+version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${source_app}/Contents/Info.plist")"
+if [[ "$version" != "0.7.0" ]]; then
+  echo "Expected Torvi 0.7.0; refusing to install stale version ${version}." >&2
   exit 1
 fi
 
-if ! /usr/bin/security find-identity -v -p codesigning | /usr/bin/grep -Fq '"Torvi Local Development"'; then
-  echo "Torvi Local Development is not available to codesign in this Terminal session." >&2
-  echo "Run setup-macos-local-signing.sh first, then try again." >&2
-  exit 1
-fi
-
-# Close only the two known product processes before replacing their bundles.
-/usr/bin/pkill -x "Torvi" 2>/dev/null || true
-/usr/bin/pkill -x "Live Copilot" 2>/dev/null || true
-/bin/sleep 1
-
-echo "Signing Torvi 0.6.1 with the stable local identity..."
+# Never replace the installed app with an unstable identity. Keychain approval
+# happens through macOS; this script never exports or prints a private key.
+echo "Signing Torvi ${version} with the stable local identity..."
 zsh "${script_directory}/sign-macos-app.sh" "$source_app"
 zsh "${script_directory}/verify-macos-permission-identity.sh" "$source_app"
 
+echo "Quit every running Torvi copy before installation, then press Return."
+read -r confirmation
 /bin/mkdir -p "$backup_directory"
-
-if [[ -d "$legacy_app" ]]; then
-  legacy_backup="${backup_directory}/Live Copilot-${backup_suffix}.app"
-  echo "Moving the legacy app to: ${legacy_backup}"
-  /bin/mv "$legacy_app" "$legacy_backup"
-fi
-
 if [[ -d "$installed_app" ]]; then
   installed_backup="${backup_directory}/Torvi-${backup_suffix}.app"
-  echo "Moving the previous installed Torvi to: ${installed_backup}"
-  /bin/mv "$installed_app" "$installed_backup"
+  echo "Preserving the previous installed app at: ${installed_backup}"
+  /bin/mkdir -p "$installed_backup"
+  # Moving Contents needs access only to Torvi.app, not all of /Applications.
+  /bin/mv "${installed_app}/Contents" "${installed_backup}/Contents"
 fi
-
-echo "Installing the signed app at ${installed_app}..."
-/usr/bin/ditto "$source_app" "$installed_app"
-/usr/bin/xattr -dr com.apple.quarantine "$installed_app" 2>/dev/null || true
-
+if ! /usr/bin/ditto "$source_app" "$installed_app"; then
+  echo "Installation failed. Previous version preserved at: ${installed_backup:-not previously installed}" >&2
+  exit 1
+fi
 zsh "${script_directory}/verify-macos-permission-identity.sh" "$installed_app"
 
-echo "Resetting the stale Screen & System Audio permission record once..."
-/usr/bin/tccutil reset ScreenCapture com.interviewcopilot.desktop
-
-echo
-echo "Installed the stable local build successfully: ${installed_app}"
-echo "When Torvi opens, grant System Audio once, then use Restart Torvi once."
+echo "Installed: ${installed_app}"
+echo "Existing macOS permissions were preserved; no automatic reset was performed."
 /usr/bin/open "$installed_app"

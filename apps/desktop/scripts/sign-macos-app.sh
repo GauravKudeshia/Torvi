@@ -39,7 +39,7 @@ if [[ ! -x "$helper_path" ]]; then
   exit 66
 fi
 
-/usr/bin/codesign --force --options runtime "$timestamp_argument" --sign "$identity_fingerprint" "$helper_path"
+/usr/bin/codesign --force --options runtime "$timestamp_argument" --entitlements "$entitlements_path" --sign "$identity_fingerprint" "$helper_path"
 /usr/bin/codesign --force --options runtime "$timestamp_argument" \
   --entitlements "$entitlements_path" \
   --sign "$identity_fingerprint" \

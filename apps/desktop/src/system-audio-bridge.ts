@@ -50,7 +50,19 @@ export async function createSystemAudioBridge(): Promise<SystemAudioBridge> {
   silenceGain.gain.value = 0;
   silence.connect(silenceGain).connect(destination);
   silence.start();
-  if (audioContext.state === 'suspended') await audioContext.resume();
+  if (audioContext.state === 'suspended') {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        audioContext.resume(),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Audio playback engine did not become ready. Retry audio.')), 5_000); }),
+      ]);
+    } catch (error) {
+      silence.stop(); destination.stream.getTracks().forEach(item => item.stop());
+      void audioContext.close().catch(() => undefined);
+      throw error;
+    } finally { clearTimeout(timer); }
+  }
 
   const track = destination.stream.getAudioTracks()[0];
   if (!track) {

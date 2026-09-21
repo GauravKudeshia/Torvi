@@ -1,6 +1,6 @@
 [package]
 name = "interview-copilot"
-version = "0.6.1"
+version = "0.7.0"
 description = "Consent-first real-time desktop copilot"
 authors = ["Torvi"]
 edition = "2021"
@@ -17,11 +17,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
-tauri = { version = "2", features = ["macos-private-api"] }
+tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-store = "2"
-tauri-plugin-updater = "2"
+tauri-plugin-single-instance = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["sync"] }
 

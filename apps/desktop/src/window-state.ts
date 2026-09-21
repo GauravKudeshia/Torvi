@@ -13,7 +13,7 @@ export type AssistantPreferences = {
   responseStyle: ResponseStyle;
   assistantSize: AssistantSize;
 };
-export type ShortcutAction = 'toggleAssistant' | 'toggleListening' | 'hideAssistant' | 'toggleOverlay' | 'clearThread' | 'captureContext';
+export type ShortcutAction = 'toggleAssistant' | 'toggleListening' | 'hideAssistant' | 'toggleOverlay' | 'clearThread' | 'captureContext' | 'dismissAssistant';
 export type ShortcutPreferences = Record<ShortcutAction, string>;
 export type DesktopPreferences = {
   rememberWindowPosition: boolean;
@@ -39,6 +39,7 @@ export const DEFAULT_SHORTCUT_PREFERENCES: ShortcutPreferences = {
   toggleOverlay: 'CommandOrControl+Shift+S',
   clearThread: 'CommandOrControl+Shift+K',
   captureContext: 'CommandOrControl+Shift+C',
+  dismissAssistant: 'CommandOrControl+Shift+Escape',
 };
 export const DEFAULT_DESKTOP_PREFERENCES: DesktopPreferences = {
   rememberWindowPosition: true,
@@ -48,7 +49,7 @@ export const DEFAULT_DESKTOP_PREFERENCES: DesktopPreferences = {
 };
 
 export function clampAssistantOpacity(value: number) {
-  return Math.min(100, Math.max(MIN_ASSISTANT_OPACITY, Math.round(value)));
+  return Number.isFinite(value) ? Math.min(100, Math.max(MIN_ASSISTANT_OPACITY, Math.round(value))) : DEFAULT_ASSISTANT_PREFERENCES.windowOpacity;
 }
 
 function validAppearanceMode(value: unknown): value is AppearanceMode {
@@ -80,6 +81,10 @@ function finiteBounds(value: unknown): value is Bounds {
 
 async function clampToVisibleDisplays(bounds: Bounds): Promise<Bounds | null> {
   const monitors = await availableMonitors();
+  return clampToWorkAreas(bounds, monitors);
+}
+
+export function clampToWorkAreas(bounds: Bounds, monitors: Array<{ workArea: { position: { x: number; y: number }; size: { width: number; height: number } } }>): Bounds | null {
   if (!monitors.length) return null;
   const ranked = monitors.map((monitor) => {
     const { workArea } = monitor;
@@ -122,8 +127,7 @@ export class WindowStateManager {
     this.store = await load(STORE_PATH, { autoSave: 150 });
     const desktopPreferences = await this.getDesktopPreferences();
     this.rememberWindowPosition = desktopPreferences.rememberWindowPosition;
-    const savedMode = await this.store.get<WindowMode>('active-mode');
-    this.mode = savedMode === 'focus' ? 'focus' : 'normal';
+    this.mode = 'focus';
     const requested = await this.store.get<Bounds>(`bounds-${this.mode}`);
     const fallback = await this.store.get<Bounds>('bounds-normal');
     const bounds = this.rememberWindowPosition && finiteBounds(requested)
@@ -134,6 +138,8 @@ export class WindowStateManager {
     this.unlisten.push(
       await this.window.onMoved(() => this.scheduleSave()),
       await this.window.onResized(() => this.scheduleSave()),
+      await this.window.onScaleChanged(() => { void this.ensureVisible(); }),
+      await this.window.onFocusChanged(({ payload }) => { if (payload) void this.ensureVisible(); }),
     );
     return {
       mode: this.mode,
@@ -228,6 +234,13 @@ export class WindowStateManager {
     const x = monitor.workArea.position.x + Math.max(0, Math.round((monitor.workArea.size.width - size.width) / 2));
     const y = monitor.workArea.position.y + Math.max(0, Math.round((monitor.workArea.size.height - size.height) / 3));
     await this.window.setPosition(new PhysicalPosition(x, y));
+  }
+
+  async ensureVisible() {
+    const [position, size] = await Promise.all([this.window.outerPosition(), this.window.outerSize()]);
+    const bounds = { x: position.x, y: position.y, width: size.width, height: size.height };
+    const safe = await clampToVisibleDisplays(bounds);
+    if (safe && Object.keys(bounds).some(key => bounds[key as keyof Bounds] !== safe[key as keyof Bounds])) await this.restore(safe);
   }
 
   async dispose() {

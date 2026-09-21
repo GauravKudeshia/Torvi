@@ -111,7 +111,15 @@ export default function App() {
     }).catch(() => Alert.alert('Sign in failed', 'Please try again.'));
   }, [response, request]);
 
-  async function startPractice() {
+  function startPractice() {
+    Alert.alert('Permission to use Torvi', 'Only continue when recording and AI assistance are allowed by everyone involved and by the rules of the conversation.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'I have permission', onPress: () => void startConsentedPractice() },
+    ]);
+  }
+
+  async function startConsentedPractice() {
+    if (busy) return;
     if (!jobTargetId || documentIds.length === 0) {
       Alert.alert('Interview context required', 'Add a company, role, and verified resume in your grounding profile before starting.');
       setTab('profile');

@@ -5,6 +5,6 @@
   <key>NSMicrophoneUsageDescription</key>
   <string>Torvi uses the microphone only during a session you explicitly start so it can label and transcribe your side of the conversation.</string>
   <key>NSScreenCaptureUsageDescription</key>
-  <string>Torvi captures system audio only during a session you explicitly start so it can transcribe interview questions from apps such as Chrome, Zoom, Teams, Meet, and Webex.</string>
+  <string>Torvi captures system audio when you start listening and captures a screen image only when you ask with screen context enabled. This lets Torvi understand your conversation and the display you choose.</string>
 </dict>
 </plist>

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Torvi",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "identifier": "com.interviewcopilot.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -11,32 +11,41 @@
   },
   "app": {
     "macOSPrivateApi": true,
-    "windows": [{
-      "label": "main",
-      "title": "Torvi",
-      "width": 880,
-      "height": 720,
-      "minWidth": 420,
-      "minHeight": 56,
-      "resizable": true,
-      "transparent": true,
-      "decorations": true,
-      "titleBarStyle": "Overlay",
-      "hiddenTitle": true,
-      "trafficLightPosition": { "x": 16, "y": 18 },
-      "acceptFirstMouse": true,
-      "alwaysOnTop": false,
-      "skipTaskbar": false,
-      "visibleOnAllWorkspaces": true,
-      "contentProtected": false
-    }],
+    "windows": [
+      {
+        "label": "main",
+        "title": "Torvi",
+        "width": 460,
+        "height": 58,
+        "minWidth": 360,
+        "minHeight": 58,
+        "resizable": true,
+        "transparent": true,
+        "decorations": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 16,
+          "y": 18
+        },
+        "acceptFirstMouse": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visibleOnAllWorkspaces": true,
+        "contentProtected": false,
+        "visible": false
+      }
+    ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' https://api.interviewcopilot.example wss://api.openai.com https://api.openai.com; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost https://api.openai.com wss://api.openai.com; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg", "nsis", "msi"],
+    "targets": [
+      "app",
+      "dmg"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -48,7 +57,7 @@
       "../native/macos/ic-screencapturekit": "ic-screencapturekit"
     },
     "macOS": {
-      "minimumSystemVersion": "13.0",
+      "minimumSystemVersion": "13.3",
       "entitlements": "Entitlements.plist",
       "hardenedRuntime": true
     },
@@ -58,10 +67,5 @@
       "timestampUrl": "http://timestamp.digicert.com"
     }
   },
-  "plugins": {
-    "updater": {
-      "endpoints": ["https://releases.interviewcopilot.example/{{target}}/{{arch}}/{{current_version}}"],
-      "pubkey": "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY"
-    }
-  }
+  "plugins": {}
 }

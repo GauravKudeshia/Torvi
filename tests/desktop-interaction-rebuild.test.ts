@@ -4,14 +4,15 @@ import test from 'node:test';
 
 test('the primary capture control exposes every recoverable state instead of silently disabling Start', async () => {
   const main = await readFile(new URL('../apps/desktop/src/main.tsx', import.meta.url), 'utf8');
-  for (const label of ['Start assistant', 'Stop listening', 'Grant audio access', 'Restart Torvi', 'Retry audio check', 'Reset permission record (advanced)']) {
+  for (const label of ['Listen', 'Stop listening', 'Grant audio access', 'Restart Torvi', 'Retry audio check', 'Reset permission record (advanced)']) {
     assert.ok(main.includes(label), `missing capture recovery label: ${label}`);
   }
   assert.match(main, /runCapturePrimaryAction/);
   assert.match(main, /captureBusyRef/);
   assert.match(main, /nativeCaptureStartedRef/);
   assert.doesNotMatch(main, /startBlocked/);
-  assert.match(main, /activeRef\.current \|\| nativeCaptureStartedRef\.current \|\| systemAudio\.captureActive/);
+  assert.match(main, /const stopNative = activeRef\.current \|\| nativeCaptureStartedRef\.current/);
+  assert.match(main, /if \(stopNative\) await invoke\('stop_audio_capture'\)/);
 });
 
 test('the focused assistant keeps Start and recovery inside the compact overlay', async () => {

@@ -1,5 +1,6 @@
 'use client';
 
+import { clientApi } from '@/lib/client-api';
 import { useEffect, useRef, useState } from 'react';
 import { AudioLines, BookOpenText, Camera, ChevronDown, ChevronLeft, ClipboardList, Copy, List, MessageCircleQuestion, Mic, MicOff, MonitorUp, RefreshCw, Save, Send, Sparkles, Trash2 } from 'lucide-react';
 import {
@@ -61,8 +62,13 @@ function captureError(error: unknown, channel: AudioChannel) {
 }
 
 export function LiveSession({ sessionId }: { sessionId: string }) {
+  const [requestLoading, setRequestLoading] = useState(false);
+  const [requestError, setRequestError] = useState('');
+  const [contextError, setContextError] = useState('');
+  const [contextAttempt, setContextAttempt] = useState(0);
+  const finishLock = useRef(false);
   const [status, setStatus] = useState('Ready — choose an audio source');
-  const [question, setQuestion] = useState('Tell me about a time you aligned teams around a difficult decision.');
+  const [question, setQuestion] = useState('');
   const [suggestion, setSuggestion] = useState<Suggestion | null>(null);
   const [streamingAnswer, setStreamingAnswer] = useState('');
   const [showExpandedAnswer, setShowExpandedAnswer] = useState(false);
@@ -76,7 +82,7 @@ export function LiveSession({ sessionId }: { sessionId: string }) {
   const [autoAssist, setAutoAssist] = useState(true);
   const [responseMode, setResponseMode] = useState<ResponseMode>('concise');
   const [responseStyle, setResponseStyle] = useState<ResponseStyle>('adaptive');
-  const [mode, setMode] = useState<InterviewMode>('behavioral');
+  const [mode, setMode] = useState<InterviewMode>('general');
   const [locale, setLocale] = useState<SessionMeta['locale']>('en');
   const [finishing, setFinishing] = useState(false);
   const [context, setContext] = useState<SessionContext | null>(null);
@@ -106,15 +112,13 @@ export function LiveSession({ sessionId }: { sessionId: string }) {
   useEffect(() => { autoAssistRef.current = autoAssist; }, [autoAssist]);
   useEffect(() => { configRef.current = { mode, locale, responseMode, responseStyle }; }, [mode, locale, responseMode, responseStyle]);
   useEffect(() => {
-    fetch(`/api/v1/sessions/${sessionId}`).then(async (response) => response.ok ? await response.json() as SessionContext : null)
+    const controller = new AbortController();
+    clientApi<SessionContext>(`/api/v1/sessions/${sessionId}`, { signal: controller.signal })
       .then((payload) => {
-        if (payload) {
-          setContext(payload);
-          setMode(payload.session.mode);
-          setLocale(payload.session.locale);
-        }
-      }).catch(() => undefined);
-  }, [sessionId]);
+        setContext(payload); setMode(payload.session.mode); setLocale(payload.session.locale); setContextError('');
+      }).catch((error) => { if (!controller.signal.aborted) setContextError(error.message); });
+    return () => controller.abort();
+  }, [sessionId, contextAttempt]);
 
   useEffect(() => {
     fetch('/api/v1/memory/communication-profile').then(async (response) => response.ok ? await response.json() as { communicationProfile?: { preferredAnswerLength: ResponseMode; bulletPreference: 'progressive' | 'bullets' | 'narrative' } } : {})
@@ -431,6 +435,7 @@ export function LiveSession({ sessionId }: { sessionId: string }) {
   }
 
   async function askCoach(nextQuestion = question, nextSegments = segmentsRef.current, action: 'answer' | 'regenerate' | 'simplify' | 'natural' | 'explain' | 'example' | 'key-points' | 'action-items' | 'follow-up' = 'answer') {
+    if (!context || contextError) return setRequestError('Load the session before asking Torvi.');
     if (nextQuestion.trim().length < 2) return setStatus('Add a question first.');
     suggestionAbortRef.current?.abort();
     const controller = new AbortController();
@@ -438,6 +443,7 @@ export function LiveSession({ sessionId }: { sessionId: string }) {
     const requestId = ++suggestionRequestRef.current;
     const currentConfig = configRef.current;
     setStatus('Thinking…');
+    setRequestLoading(true); setRequestError(''); setSuggestion(null);
     setStreamingAnswer('');
     setView('assist');
     try {
@@ -454,19 +460,19 @@ export function LiveSession({ sessionId }: { sessionId: string }) {
           verifiedFacts: [],
           target: {},
         }),
-        signal: controller.signal,
+        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(60_000)]),
       });
       if (requestId !== suggestionRequestRef.current) return;
       if (!response.ok || !response.body) {
         const payload = await response.json().catch(() => ({})) as { error?: { message?: string } };
-        setStatus(payload.error?.message ?? 'The coach is unavailable.');
-        return;
+        throw new Error(payload.error?.message ?? 'The assistant is unavailable. Please retry.');
       }
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
       let finalSuggestion: Suggestion | null = null;
       const consume = (block: string) => {
+        if (requestId !== suggestionRequestRef.current || controller.signal.aborted) return;
         const type = block.split(/\r?\n/).find((line) => line.startsWith('event:'))?.slice(6).trim();
         const data = block.split(/\r?\n/).filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trimStart()).join('\n');
         if (!type || !data) return;
@@ -477,6 +483,7 @@ export function LiveSession({ sessionId }: { sessionId: string }) {
       };
       while (true) {
         const chunk = await reader.read();
+        if (requestId !== suggestionRequestRef.current || controller.signal.aborted) { await reader.cancel(); return; }
         if (chunk.done) break;
         buffer += decoder.decode(chunk.value, { stream: true });
         const blocks = buffer.split(/\r?\n\r?\n/);
@@ -487,6 +494,7 @@ export function LiveSession({ sessionId }: { sessionId: string }) {
       if (buffer.trim()) consume(buffer);
       if (requestId !== suggestionRequestRef.current) return;
       const completedSuggestion = finalSuggestion as Suggestion | null;
+      if (!completedSuggestion) throw new Error('The response ended before it was complete. Please retry.');
       if (completedSuggestion) {
         setSuggestion(completedSuggestion);
         setStreamingAnswer('');
@@ -494,10 +502,11 @@ export function LiveSession({ sessionId }: { sessionId: string }) {
         setStatus(completedSuggestion.grounded ? 'Grounded answer ready' : 'Answer frame ready — add your facts');
       }
     } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') return;
-      if (requestId === suggestionRequestRef.current) setStatus('The coach was interrupted. Use Ask AI to retry.');
+      if (controller.signal.aborted || requestId !== suggestionRequestRef.current) return;
+      const message = error instanceof Error ? error.message : 'The response was interrupted. Please retry.';
+      setStreamingAnswer(''); setRequestError(message); setStatus('Response interrupted');
     } finally {
-      if (suggestionAbortRef.current === controller) suggestionAbortRef.current = null;
+      if (suggestionAbortRef.current === controller) { suggestionAbortRef.current = null; setRequestLoading(false); }
     }
   }
 
@@ -555,25 +564,32 @@ export function LiveSession({ sessionId }: { sessionId: string }) {
   }
 
   async function close(choice: 'save' | 'discard') {
-    setFinishing(true);
+    if (finishLock.current) return;
+    if (choice === 'discard' && !window.confirm('Discard this session without saving its transcript or notes?')) return;
+    finishLock.current = true; setFinishing(true);
     stopAllAudio();
-    await fetch(`/api/v1/sessions/${sessionId}/end`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ liveSeconds: seconds }) });
-    const response = await fetch(`/api/v1/sessions/${sessionId}/${choice}`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: choice === 'save' ? JSON.stringify({ segments }) : undefined,
-    });
-    if (!response.ok) { setFinishing(false); setStatus('Could not finish the session. Try again.'); return; }
-    window.location.href = choice === 'save' ? '/reports' : '/dashboard';
+    try {
+      await clientApi(`/api/v1/sessions/${sessionId}/end`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ liveSeconds: seconds }) });
+      await clientApi(`/api/v1/sessions/${sessionId}/${choice}`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: choice === 'save' ? JSON.stringify({ segments: segmentsRef.current }) : undefined,
+      });
+      window.location.href = choice === 'save' ? `/history?session=${sessionId}` : '/dashboard';
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'Could not finish. Your transcript is still here; try again.');
+    } finally { finishLock.current = false; setFinishing(false); }
   }
 
   const recap = segments.length
     ? segments.slice(-6).map((segment) => `${segment.speaker === 'candidate' ? 'You' : 'Interviewer'}: ${segment.text}`)
     : ['Start laptop audio or your microphone to build a live recap.'];
 
+  if (contextError) return <main className="live-shell"><section className="request-error" role="alert"><h1>Session unavailable</h1><p>{contextError}</p><button onClick={() => { setContextError(''); setContextAttempt((value) => value + 1); }}>Retry</button><a href="/dashboard">Back to Home</a></section></main>;
+  if (!context) return <main className="live-shell"><p role="status">Loading your session…</p></main>;
   return <main className="live-shell">
     <header className="live-top"><a href="/dashboard"><ChevronLeft size={17} /> Dashboard</a><div><i className={active ? 'active' : ''} />{status}</div><time>{String(Math.floor(seconds / 60)).padStart(2, '0')}:{String(seconds % 60).padStart(2, '0')}</time></header>
     <section className="live-workspace">
-      <aside className="live-transcript"><div className="transcript-head"><span className="section-kicker">Live transcript</span><span>{segments.length} turns</span></div>{segments.length ? segments.map((segment) => <div key={segment.id}><b>{segment.speaker === 'candidate' ? 'You' : 'Interviewer'}</b><p>{segment.text}</p></div>) : <div className="transcript-empty"><AudioLines size={22} /><p>Start laptop audio to detect YouTube or interview questions automatically. Nothing is saved until you choose Save.</p></div>}{partialTranscript.interviewer && <div className="partial-turn"><b>Interviewer · live</b><p>{partialTranscript.interviewer}<i /></p></div>}{partialTranscript.candidate && <div className="partial-turn"><b>You · live</b><p>{partialTranscript.candidate}<i /></p></div>}</aside>
+      <details className="live-transcript"><summary>Transcript ({segments.length} turns)</summary><div className="transcript-head"><span className="section-kicker">Live transcript</span><span>{segments.length} turns</span></div>{segments.length ? segments.map((segment) => <div key={segment.id}><b>{segment.speaker === 'candidate' ? 'You' : 'Interviewer'}</b><p>{segment.text}</p></div>) : <div className="transcript-empty"><AudioLines size={22} /><p>Start laptop audio to detect YouTube or interview questions automatically. Nothing is saved until you choose Save.</p></div>}{partialTranscript.interviewer && <div className="partial-turn"><b>Interviewer · live</b><p>{partialTranscript.interviewer}<i /></p></div>}{partialTranscript.candidate && <div className="partial-turn"><b>You · live</b><p>{partialTranscript.candidate}<i /></p></div>}</details>
       <section className="live-answer">
         <div className="live-answer-head"><div><Sparkles size={17} /><span>Realtime copilot</span></div><div className="live-answer-status">{suggestion && <span className={`confidence ${suggestion.confidence}`}>{suggestion.confidence} confidence</span>}<span className="privacy-badge">Ephemeral</span></div></div>
         <div className="live-context-bar"><span><b>{context?.target?.role ?? 'Interview'}</b>{context?.target?.company ? ` at ${context.target.company}` : ''}</span><span><BookOpenText size={13} /> {(context?.documents.length ?? 0) + (context?.target?.jobDescription ? 1 : 0)} grounding sources</span><button type="button" onClick={createDesktopLink} disabled={linkingDesktop}><MonitorUp size={13} /> {linkingDesktop ? 'Creating…' : 'Connect Mac app'}</button></div>
@@ -581,11 +597,11 @@ export function LiveSession({ sessionId }: { sessionId: string }) {
         {!activeChannels.interviewer && <div className="web-audio-guide"><MonitorUp size={18} /><div><b>For YouTube, Meet, or any browser interview</b><span>Click <strong>Listen to laptop audio</strong>, select the tab/window/screen playing sound, and enable <strong>Share audio</strong>. Questions are then detected and answered automatically.</span></div></div>}
         {active && <div className="audio-health" aria-label="Live audio health">{(['interviewer', 'candidate'] as AudioChannel[]).filter((channel) => activeChannels[channel]).map((channel) => { const diagnostic = diagnostics[channel]; const silent = diagnostic.lastAudibleAt !== null && Date.now() - diagnostic.lastAudibleAt > 7_000; return <div key={channel} className={diagnostic.muted || silent ? 'warning' : ''}><span>{channel === 'interviewer' ? <MonitorUp size={13} /> : <Mic size={13} />}<b>{channel === 'interviewer' ? 'Laptop audio' : 'Microphone'}</b></span><div className="level-track"><i style={{ width: `${Math.max(3, Math.round(diagnostic.level * 100))}%` }} /></div><small>{diagnostic.muted ? 'Source is muted' : silent ? 'Connected, but no sound detected' : diagnostic.source}</small></div>; })}</div>}
         <nav className="live-tabs"><button className={view === 'assist' ? 'active' : ''} onClick={() => setView('assist')}>Assist</button><button className={view === 'follow-ups' ? 'active' : ''} onClick={() => setView('follow-ups')}>Follow-ups</button><button className={view === 'recap' ? 'active' : ''} onClick={() => setView('recap')}>Recap</button></nav>
-        {view === 'assist' && <><div className="live-response-controls"><div className="response-mode-row"><span>Style</span><div>{responseStyles.map((option) => <button key={option.key} className={responseStyle === option.key ? 'active' : ''} onClick={() => setResponseStyle(option.key)}>{option.label}</button>)}</div></div><div className="response-mode-row"><span>Length</span><div>{responseModes.map((option) => <button key={option.key} className={responseMode === option.key ? 'active' : ''} onClick={() => setResponseMode(option.key)}>{option.label}</button>)}</div></div></div><div className="question-box"><label htmlFor="question">Detected or typed question</label><textarea id="question" value={question} onChange={(event) => setQuestion(event.target.value)} /></div>{suggestion && suggestion.recommendation !== 'answer' && <div className={`answer-recommendation recommendation-${suggestion.recommendation}`}><b>{suggestion.recommendation === 'clarify_first' ? 'Clarify first' : suggestion.recommendation === 'closest_verified_example' ? 'Closest real experience' : 'No verified personal example found'}</b><span>{suggestion.clarificationSuggestion ?? 'Use a truthful general answer without presenting it as personal history.'}</span></div>}<article className="suggestion-copy"><span>{responseStyle === 'bullets' ? 'Point answer' : responseStyle === 'paragraph' ? 'Paragraph answer' : 'Smart answer'}</span><p className={streamingAnswer ? 'streaming' : ''}>{streamingAnswer || suggestion?.directAnswer || suggestion?.answer || 'Start laptop audio for automatic question detection, or ask the coach manually. Your response will stream here as it is generated.'}</p></article>{suggestion?.supportingPoints?.length || suggestion?.bullets?.length ? <div className={`suggestion-points progressive-points ${responseStyle === 'bullets' ? 'primary-points' : ''}`}><b>{responseStyle === 'bullets' ? 'Conversational points' : 'Supporting points'}</b>{(suggestion.supportingPoints.length ? suggestion.supportingPoints : suggestion.bullets).map((bullet) => <span key={bullet}>{bullet}</span>)}</div> : null}{suggestion?.expandedAnswer && <div className="expanded-answer"><button onClick={() => setShowExpandedAnswer((current) => !current)}>{responseMode === 'detailed' ? 'Full response' : 'Expand answer'} <ChevronDown size={14} className={showExpandedAnswer ? 'open' : ''} /></button>{showExpandedAnswer && <p>{suggestion.expandedAnswer}</p>}</div>}{suggestion && <div className="context-actions" aria-label="Context-aware response actions"><button onClick={() => askCoach(question, segmentsRef.current, 'regenerate')}><RefreshCw size={13} /> Regenerate</button><button onClick={() => askCoach(question, segmentsRef.current, 'simplify')}>Simplify</button><button onClick={() => askCoach(question, segmentsRef.current, 'natural')}>More natural</button><button onClick={() => askCoach(question, segmentsRef.current, mode === 'meeting' ? 'action-items' : 'key-points')}><List size={13} /> {mode === 'meeting' ? 'Action items' : 'Key points'}</button><button onClick={() => askCoach(question, segmentsRef.current, 'follow-up')}>Follow-up</button></div>}{suggestion && <div className="grounding-summary"><div><span>Grounding</span><b>{suggestion.grounding.level} · {suggestion.grounding.verifiedClaimIds.length} verified {suggestion.grounding.verifiedClaimIds.length === 1 ? 'claim' : 'claims'}</b></div><div><span>Challengeability</span><b>{suggestion.challengeability.label.replaceAll('_', ' ')}</b></div></div>}{suggestion?.citations?.length ? <div className="answer-sources"><div><BookOpenText size={14} /><b>Why this answer</b></div>{suggestion.citations.map((citation) => <article key={citation.documentId}><span>{citation.kind === 'resume' ? 'Verified resume' : citation.kind === 'job-description' ? 'Job description' : 'Supporting source'}</span><b>{citation.label}</b><p>{citation.excerpt}</p></article>)}</div> : null}{suggestion?.grounding.unsupportedElements.length ? <p className="grounding-caution">Needs evidence: {suggestion.grounding.unsupportedElements.join(' · ')}</p> : suggestion?.caution ? <p className="grounding-caution">{suggestion.caution}</p> : null}{analysis && <article className="screen-analysis"><b>Visible screen context</b><p>{analysis}</p></article>}{mode === 'meeting' && <div className="meeting-capture"><label htmlFor="capture-text">Capture from this conversation</label><input id="capture-text" value={captureText} onChange={(event) => setCaptureText(event.target.value)} placeholder="Type a note, or leave blank to use the latest turn" /><div><button onClick={() => captureMeeting('note')}>Note</button><button onClick={() => captureMeeting('decision')}>Decision</button><button onClick={() => captureMeeting('action')}>Action item</button><button onClick={() => captureMeeting('bookmark')}>Bookmark</button></div></div>}<div className="live-actions"><button onClick={() => askCoach()}><Send size={15} /> Ask AI <kbd>⌘↵</kbd></button><button onClick={analyzeVisibleScreen}><Camera size={15} /> Analyze screen</button>{suggestion && <button onClick={() => navigator.clipboard.writeText(responseStyle === 'bullets' ? (suggestion.supportingPoints.length ? suggestion.supportingPoints : suggestion.bullets).map((point) => `• ${point}`).join('\n') : suggestion.expandedAnswer || suggestion.answer || suggestion.directAnswer)}><Copy size={15} /> Copy</button>}</div></>}
+        {view === 'assist' && <><details className="live-preferences"><summary>Answer preferences</summary><div className="live-response-controls"><div className="response-mode-row"><span>Style</span><div>{responseStyles.map((option) => <button key={option.key} className={responseStyle === option.key ? 'active' : ''} onClick={() => setResponseStyle(option.key)}>{option.label}</button>)}</div></div><div className="response-mode-row"><span>Length</span><div>{responseModes.map((option) => <button key={option.key} className={responseMode === option.key ? 'active' : ''} onClick={() => setResponseMode(option.key)}>{option.label}</button>)}</div></div></div></details><div className="question-box"><label htmlFor="question">Detected or typed question</label><textarea id="question" placeholder="Ask about your conversation…" value={question} onChange={(event) => setQuestion(event.target.value)} /></div>{suggestion && suggestion.recommendation !== 'answer' && <div className={`answer-recommendation recommendation-${suggestion.recommendation}`}><b>{suggestion.recommendation === 'clarify_first' ? 'Clarify first' : suggestion.recommendation === 'closest_verified_example' ? 'Closest real experience' : 'No verified personal example found'}</b><span>{suggestion.clarificationSuggestion ?? 'Use a truthful general answer without presenting it as personal history.'}</span></div>}<article className="suggestion-copy"><span>{responseStyle === 'bullets' ? 'Point answer' : responseStyle === 'paragraph' ? 'Paragraph answer' : 'Smart answer'}</span><p className={streamingAnswer ? 'streaming' : ''}>{streamingAnswer || suggestion?.directAnswer || suggestion?.answer || 'Start laptop audio for automatic question detection, or ask the coach manually. Your response will stream here as it is generated.'}</p></article>{suggestion?.supportingPoints?.length || suggestion?.bullets?.length ? <div className={`suggestion-points progressive-points ${responseStyle === 'bullets' ? 'primary-points' : ''}`}><b>{responseStyle === 'bullets' ? 'Conversational points' : 'Supporting points'}</b>{(suggestion.supportingPoints.length ? suggestion.supportingPoints : suggestion.bullets).map((bullet) => <span key={bullet}>{bullet}</span>)}</div> : null}{suggestion?.expandedAnswer && <div className="expanded-answer"><button onClick={() => setShowExpandedAnswer((current) => !current)}>{responseMode === 'detailed' ? 'Full response' : 'Expand answer'} <ChevronDown size={14} className={showExpandedAnswer ? 'open' : ''} /></button>{showExpandedAnswer && <p>{suggestion.expandedAnswer}</p>}</div>}{suggestion && <details className="response-more"><summary>Adjust answer</summary><div className="context-actions" aria-label="Context-aware response actions"><button onClick={() => askCoach(question, segmentsRef.current, 'regenerate')}><RefreshCw size={13} /> Regenerate</button><button onClick={() => askCoach(question, segmentsRef.current, 'simplify')}>Simplify</button><button onClick={() => askCoach(question, segmentsRef.current, 'natural')}>More natural</button><button onClick={() => askCoach(question, segmentsRef.current, mode === 'meeting' ? 'action-items' : 'key-points')}><List size={13} /> {mode === 'meeting' ? 'Action items' : 'Key points'}</button><button onClick={() => askCoach(question, segmentsRef.current, 'follow-up')}>Follow-up</button></div></details>}{suggestion && <div className="grounding-summary"><div><span>Grounding</span><b>{suggestion.grounding.level} · {suggestion.grounding.verifiedClaimIds.length} verified {suggestion.grounding.verifiedClaimIds.length === 1 ? 'claim' : 'claims'}</b></div><div><span>Challengeability</span><b>{suggestion.challengeability.label.replaceAll('_', ' ')}</b></div></div>}{suggestion?.citations?.length ? <div className="answer-sources"><div><BookOpenText size={14} /><b>Why this answer</b></div>{suggestion.citations.map((citation) => <article key={citation.documentId}><span>{citation.kind === 'resume' ? 'Verified resume' : citation.kind === 'job-description' ? 'Job description' : 'Supporting source'}</span><b>{citation.label}</b><p>{citation.excerpt}</p></article>)}</div> : null}{suggestion?.grounding.unsupportedElements.length ? <p className="grounding-caution">Needs evidence: {suggestion.grounding.unsupportedElements.join(' · ')}</p> : suggestion?.caution ? <p className="grounding-caution">{suggestion.caution}</p> : null}{analysis && <article className="screen-analysis"><b>Visible screen context</b><p>{analysis}</p></article>}{mode === 'meeting' && <div className="meeting-capture"><label htmlFor="capture-text">Capture from this conversation</label><input id="capture-text" value={captureText} onChange={(event) => setCaptureText(event.target.value)} placeholder="Type a note, or leave blank to use the latest turn" /><div><button onClick={() => captureMeeting('note')}>Note</button><button onClick={() => captureMeeting('decision')}>Decision</button><button onClick={() => captureMeeting('action')}>Action item</button><button onClick={() => captureMeeting('bookmark')}>Bookmark</button></div></div>}<div className="live-actions">{requestError && <div className="request-error" role="alert"><p>{requestError}</p><button onClick={() => void askCoach()}>Retry answer</button></div>}{requestLoading && <button onClick={() => { suggestionRequestRef.current += 1; suggestionAbortRef.current?.abort(); suggestionAbortRef.current = null; setRequestLoading(false); setStreamingAnswer(''); setStatus('Response stopped'); }}>Stop response</button>}<button disabled={requestLoading || !question.trim()} onClick={() => askCoach()}><Send size={15} /> Ask AI <kbd>⌘↵</kbd></button><button onClick={analyzeVisibleScreen}><Camera size={15} /> Analyze screen</button>{suggestion && <button onClick={() => navigator.clipboard.writeText(responseStyle === 'bullets' ? (suggestion.supportingPoints.length ? suggestion.supportingPoints : suggestion.bullets).map((point) => `• ${point}`).join('\n') : suggestion.expandedAnswer || suggestion.answer || suggestion.directAnswer)}><Copy size={15} /> Copy</button>}</div></>}
         {view === 'follow-ups' && <div className="copilot-list"><MessageCircleQuestion size={23} /><h2>Likely follow-up questions</h2>{suggestion?.likelyFollowUps?.length ? suggestion.likelyFollowUps.map((item) => <button key={item.question} onClick={() => { setQuestion(item.question); setView('assist'); }}><span>{item.type.replaceAll('_', ' ')}</span>{item.question}</button>) : suggestion?.followUps?.length ? suggestion.followUps.map((item) => <button key={item} onClick={() => { setQuestion(item); setView('assist'); }}>{item}</button>) : <p>Ask the coach once and likely follow-ups will appear here.</p>}</div>}
         {view === 'recap' && <div className="copilot-list recap-list"><ClipboardList size={23} /><h2>Conversation recap</h2>{recap.map((item) => <p key={item}>{item}</p>)}</div>}
       </section>
     </section>
-    <footer className="live-controls"><div className="capture-controls"><button className={activeChannels.interviewer ? 'source-control active' : 'source-control'} disabled={startingChannel !== null && startingChannel !== 'interviewer'} onClick={() => activeChannels.interviewer ? stopChannel('interviewer') : startAudio('interviewer')}>{activeChannels.interviewer ? <MicOff /> : <MonitorUp />}</button><div><span>{startingChannel === 'interviewer' ? 'Opening audio picker…' : activeChannels.interviewer ? 'Stop laptop audio' : 'Listen to laptop audio'}</span><small>YouTube · Meet · Teams · Zoom · Webex</small></div><button className={activeChannels.candidate ? 'source-control mic-source active' : 'source-control mic-source'} disabled={startingChannel !== null && startingChannel !== 'candidate'} onClick={() => activeChannels.candidate ? stopChannel('candidate') : startAudio('candidate')}>{activeChannels.candidate ? <MicOff /> : <Mic />}</button><div><span>{startingChannel === 'candidate' ? 'Opening microphone…' : activeChannels.candidate ? 'Stop my microphone' : 'Add my microphone'}</span><label><input type="checkbox" checked={autoAssist} onChange={(event) => setAutoAssist(event.target.checked)} /> Auto-answer detected questions</label></div></div><div className="retention-actions"><button disabled={finishing} onClick={() => close('discard')}><Trash2 size={15} /> Discard</button><button disabled={finishing} className="save" onClick={() => close('save')}><Save size={15} /> {finishing ? 'Finishing…' : 'Save, notes & finish'}</button></div></footer>
+    <footer className="live-controls"><div className="capture-controls"><button aria-label={activeChannels.interviewer ? 'Stop laptop audio' : 'Listen to laptop audio'} className={activeChannels.interviewer ? 'source-control active' : 'source-control'} disabled={startingChannel !== null} onClick={() => activeChannels.interviewer ? stopChannel('interviewer') : startAudio('interviewer')}>{activeChannels.interviewer ? <MicOff /> : <MonitorUp />}</button><div><span>{startingChannel === 'interviewer' ? 'Opening audio picker…' : activeChannels.interviewer ? 'Stop laptop audio' : 'Listen to laptop audio'}</span><small>YouTube · Meet · Teams · Zoom · Webex</small></div><button aria-label={activeChannels.candidate ? 'Stop microphone' : 'Listen to microphone'} className={activeChannels.candidate ? 'source-control mic-source active' : 'source-control mic-source'} disabled={startingChannel !== null} onClick={() => activeChannels.candidate ? stopChannel('candidate') : startAudio('candidate')}>{activeChannels.candidate ? <MicOff /> : <Mic />}</button><div><span>{startingChannel === 'candidate' ? 'Opening microphone…' : activeChannels.candidate ? 'Stop my microphone' : 'Add my microphone'}</span><label><input type="checkbox" checked={autoAssist} onChange={(event) => setAutoAssist(event.target.checked)} /> Auto-answer detected questions</label></div></div><div className="retention-actions"><button disabled={finishing} onClick={() => close('discard')}><Trash2 size={15} /> Discard</button><button disabled={finishing} className="save" onClick={() => close('save')}><Save size={15} /> {finishing ? 'Finishing…' : 'Save, notes & finish'}</button></div></footer>
   </main>;
 }

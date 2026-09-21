@@ -1,11 +1,13 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, isNativeDesktop } from './native-bridge';
 import { listen } from '@tauri-apps/api/event';
+declare const __TORVI_BUILD_ID__: string;
 import { LogicalSize } from '@tauri-apps/api/dpi';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
   interviewModes,
+  suggestionSchema,
   isLikelyInterviewQuestion,
   isLikelyTranscriptNoise,
   modeRequiresVerifiedResume,
@@ -23,7 +25,10 @@ import {
   type AudioChunk,
   type SystemAudioBridge,
 } from './system-audio-bridge';
-import { ControlCenter, type DesktopAccount, type NativeSessionContext } from './control-center';
+import type { DesktopAccount, NativeSessionContext } from './control-center';
+import { SessionLauncher } from './session-launcher';
+import { requestMicrophone } from './microphone';
+const ControlCenter = React.lazy(() => import('./control-center').then(module => ({ default: module.ControlCenter })));
 import { AssistantOverlay, type AssistantPanelState } from './assistant-overlay';
 import { desktopApi } from './desktop-api';
 import { ShortcutManager, type ShortcutConflict } from './shortcuts';
@@ -47,6 +52,7 @@ import './window-controls.css';
 import './control-center.css';
 import './assistant-overlay.css';
 import './experience.css';
+import './floating-assistant.css';
 
 type Surface = 'workspace' | 'live';
 type AnswerLayer = 'five' | 'twenty' | 'sixty' | 'deep';
@@ -104,18 +110,7 @@ function elapsed(from?: number, to?: number) {
   return from != null && to != null ? Math.max(0, Math.round(to - from)) : null;
 }
 
-const desktopAppVersion = '0.6.1';
-const desktopPreview = import.meta.env.MODE === 'preview' && new URLSearchParams(window.location.search).has('preview');
-const previewParams = new URLSearchParams(window.location.search);
-const desktopPreviewLive = desktopPreview && previewParams.get('surface') === 'live';
-const desktopPreviewFocus = desktopPreviewLive && previewParams.get('focus') === '1';
-const desktopPreviewDensity: Density = previewParams.get('density') === 'minimal' ? 'minimal' : previewParams.get('density') === 'compact' ? 'compact' : 'comfortable';
-const desktopPreviewPreferences: AssistantPreferences = {
-  appearanceMode: ['dark', 'light', 'adaptive', 'glass'].includes(previewParams.get('appearance') ?? '') ? previewParams.get('appearance') as AssistantPreferences['appearanceMode'] : DEFAULT_ASSISTANT_PREFERENCES.appearanceMode,
-  assistantSize: ['compact', 'standard', 'expanded'].includes(previewParams.get('size') ?? '') ? previewParams.get('size') as AssistantSize : DEFAULT_ASSISTANT_PREFERENCES.assistantSize,
-  responseStyle: ['adaptive', 'bullets', 'paragraph'].includes(previewParams.get('format') ?? '') ? previewParams.get('format') as ResponseStyle : DEFAULT_ASSISTANT_PREFERENCES.responseStyle,
-  windowOpacity: clampAssistantOpacity(Number(previewParams.get('opacity') ?? DEFAULT_ASSISTANT_PREFERENCES.windowOpacity)),
-};
+const desktopAppVersion = '0.7.0';
 const answerLayers: Array<{ id: AnswerLayer; label: string; hint: string }> = [
   { id: 'five', label: '5 sec', hint: 'Direct' }, { id: 'twenty', label: '20 sec', hint: 'Talking points' },
   { id: 'sixty', label: '60 sec', hint: 'Full example' }, { id: 'deep', label: 'Go deeper', hint: 'Evidence + trade-offs' },
@@ -131,7 +126,8 @@ function nativeAudioFailure(error: unknown): SystemAudioFailure | null {
 }
 
 function realtimeFailure(error: unknown) {
-  if (error instanceof DOMException && error.name === 'NotAllowedError') return 'Microphone permission was denied. System audio can still run; enable the microphone in macOS settings when ready.';
+  if (error instanceof DOMException && error.name === 'NotAllowedError') return 'Microphone permission was denied. Open More → Microphone permission settings, enable Torvi, then retry.';
+  if (error instanceof DOMException && error.name === 'NotFoundError') return 'No microphone is available. Connect a microphone or choose System audio.';
   const nativeFailure = nativeAudioFailure(error);
   if (nativeFailure) return nativeFailure.message;
   return error instanceof Error ? error.message : String(error);
@@ -141,29 +137,30 @@ function statusCopy(value: string) { return value.replaceAll('_', ' ').replaceAl
 function eventTimestamp() { return Date.now(); }
 
 function App() {
-  const [surface, setSurface] = React.useState<Surface>(desktopPreviewLive ? 'live' : 'workspace');
+  const [surface, setSurface] = React.useState<Surface>('live');
   const [active, setActive] = React.useState(false);
-  const [density, setDensity] = React.useState<Density>(desktopPreviewDensity);
-  const [context, setContext] = React.useState<SessionContext | null>(desktopPreview ? {
-    session: { id: 'preview-session', mode: 'general', locale: 'en', status: 'prepared' },
-    target: { id: 'preview-target', role: 'Weekly product sync', company: 'Northstar', jobDescription: 'Clarify launch decisions, ownership, and next steps.' },
-    documents: [{ id: 'preview-notes', fileName: 'Product brief.pdf', kind: 'other', parseStatus: 'ready' }],
-  } : null);
-  const [account, setAccount] = React.useState<DesktopAccount | null>(desktopPreview ? { tokenExpiresAt: 4_102_444_800_000, deviceId: 'preview-device', scope: 'account' } : null);
-  const [question, setQuestion] = React.useState(desktopPreviewLive ? 'How should I explain the launch trade-off and confirm the next step?' : 'Ask anything about your screen or conversation…');
+  const [density, setDensity] = React.useState<Density>('comfortable');
+  const [context, setContext] = React.useState<SessionContext | null>(null);
+  const [account, setAccount] = React.useState<DesktopAccount | null>(null);
+  const [question, setQuestion] = React.useState('');
+  const [launchOpen, setLaunchOpen] = React.useState(false);
+  const [audioSource, setAudioSource] = React.useState<'microphone' | 'both' | 'system'>('microphone');
+  const audioSourceRef = React.useRef(audioSource);
+  React.useEffect(() => { audioSourceRef.current = audioSource; }, [audioSource]);
   const [partial, setPartial] = React.useState('');
   const [suggestion, setSuggestion] = React.useState<Suggestion | null>(null);
-  const [streamingAnswer, setStreamingAnswer] = React.useState(desktopPreviewLive ? 'Lead with the decision, name the trade-off plainly, and close by confirming the owner and deadline: “We are protecting launch quality by narrowing scope today; I’ll share the revised plan by 3 PM, and we’ll confirm readiness tomorrow.”' : '');
+  const [streamingAnswer, setStreamingAnswer] = React.useState('');
   const [suggestionLoading, setSuggestionLoading] = React.useState(false);
   const [pipelineMetrics, setPipelineMetrics] = React.useState<PipelineMetrics>({ source: 'manual' });
   const [answerLayer, setAnswerLayer] = React.useState<AnswerLayer>('five');
   const [lastResponseMode, setLastResponseMode] = React.useState('concise');
-  const [status, setStatus] = React.useState(desktopPreview ? 'Desktop interface preview' : 'Opening Torvi');
+  const [status, setStatus] = React.useState('Opening Torvi');
   const [level, setLevel] = React.useState(0);
   const [micLevel, setMicLevel] = React.useState(0);
+  const [micMuted, setMicMuted] = React.useState(false);
   const [micConnected, setMicConnected] = React.useState(false);
   const [sourceVerified, setSourceVerified] = React.useState(false);
-  const [systemAudio, setSystemAudio] = React.useState<SystemAudioStatus>(desktopPreviewLive ? { ...initialSystemAudioStatus, state: 'authorized', permissionGranted: true, reason: 'System audio is ready.' } : initialSystemAudioStatus);
+  const [systemAudio, setSystemAudio] = React.useState<SystemAudioStatus>(initialSystemAudioStatus);
   const [droppedChunks, setDroppedChunks] = React.useState(0);
   const [seconds, setSeconds] = React.useState(0);
   const [finishing, setFinishing] = React.useState(false);
@@ -173,12 +170,15 @@ function App() {
   const [brain, setBrain] = React.useState<SessionBrainResponse | null>(null);
   const [online, setOnline] = React.useState(navigator.onLine);
   const [reconnectAttempts, setReconnectAttempts] = React.useState<Record<Channel, number>>({ interviewer: 0, candidate: 0 });
-  const [focusMode, setFocusMode] = React.useState(desktopPreviewFocus);
+  const [focusMode, setFocusMode] = React.useState(true);
   const [privateOverlay, setPrivateOverlay] = React.useState(false);
   const [screenContextEnabled, setScreenContextEnabled] = React.useState(false);
   const [copilotMode, setCopilotMode] = React.useState<InterviewMode>('general');
   const [clickThrough, setClickThrough] = React.useState(false);
-  const [assistantPreferences, setAssistantPreferences] = React.useState<AssistantPreferences>(desktopPreview ? desktopPreviewPreferences : DEFAULT_ASSISTANT_PREFERENCES);
+  const [assistantPreferences, setAssistantPreferences] = React.useState<AssistantPreferences>(DEFAULT_ASSISTANT_PREFERENCES);
+  const suggestionIntentRef = React.useRef(0);
+  const [generationError, setGenerationError] = React.useState('');
+  const [captureError, setCaptureError] = React.useState('');
   const [assistantPanelState, setAssistantPanelState] = React.useState<AssistantPanelState>('collapsed');
   const [assistantFocusRequest, setAssistantFocusRequest] = React.useState(0);
   const [shortcuts, setShortcuts] = React.useState<ShortcutPreferences>(DEFAULT_SHORTCUT_PREFERENCES);
@@ -199,6 +199,8 @@ function App() {
   const channelsRef = React.useRef<Partial<Record<Channel, { peer: RTCPeerConnection; events: RTCDataChannel }>>>({});
   const systemAudioBridgeRef = React.useRef<SystemAudioBridge | null>(null);
   const micStreamRef = React.useRef<MediaStream | null>(null);
+  const micBridgeRef = React.useRef<SystemAudioBridge | null>(null);
+  const nativeMicStartedRef = React.useRef(false);
   const micMonitorRef = React.useRef<{ audioContext: AudioContext; frame: number } | null>(null);
   const partialsRef = React.useRef<Record<Channel, Record<string, string>>>({ interviewer: {}, candidate: {} });
   const lastQuestionRef = React.useRef({ key: '', text: '', at: 0 });
@@ -216,9 +218,9 @@ function App() {
   const opacityRef = React.useRef<(delta: number) => void>(() => undefined);
   const reconnectTimersRef = React.useRef<Partial<Record<Channel, number>>>({});
   const reconnectAttemptRef = React.useRef<Record<Channel, number>>({ interviewer: 0, candidate: 0 });
-  const assistantPreferencesRef = React.useRef<AssistantPreferences>(desktopPreview ? desktopPreviewPreferences : DEFAULT_ASSISTANT_PREFERENCES);
+  const assistantPreferencesRef = React.useRef<AssistantPreferences>(DEFAULT_ASSISTANT_PREFERENCES);
   const shortcutsRef = React.useRef<ShortcutPreferences>(DEFAULT_SHORTCUT_PREFERENCES);
-  const focusModeRef = React.useRef(desktopPreviewFocus);
+  const focusModeRef = React.useRef(true);
   const panelStateRef = React.useRef<AssistantPanelState>('collapsed');
 
   React.useEffect(() => { contextRef.current = context; }, [context]);
@@ -239,11 +241,11 @@ function App() {
     try {
       const [accountState, restored] = await Promise.all([invoke<DesktopAccount | null>('desktop_account_status'), invoke<SessionContext | null>('restore_desktop_connection')]);
       setAccount(accountState);
-      if (restored) { setContext(restored); setCopilotMode(restored.session.mode); setStatus('Prepared session restored — open Torvi when ready'); }
+      if (restored && ['created', 'prepared', 'active', 'paused'].includes(restored.session.status)) { setContext(restored); setCopilotMode(restored.session.mode); setStatus('Prepared session restored — open Torvi when ready'); }
       else if (accountState?.scope === 'account') setStatus('Native workspace ready');
       else setStatus('Sign in to open your workspace');
-      setSurface('workspace');
-    } catch (error) { setStatus(realtimeFailure(error)); }
+      setSurface('live');
+    } catch (error) { setGenerationError(realtimeFailure(error)); setStatus(realtimeFailure(error)); }
   }
 
   async function loadSessionIntelligence(nextContext: SessionContext) {
@@ -305,7 +307,7 @@ function App() {
     if (isLikelyTranscriptNoise(transcript)) return;
     const now = eventTimestamp();
     appendSegment({ id: crypto.randomUUID(), speaker: channel, text: transcript, startedAtMs: now, endedAtMs: now + 1, final: true, itemId: typeof payload.item_id === 'string' ? payload.item_id : undefined });
-    if (channel === 'candidate') { setStatus('Your side was transcribed'); return; }
+    if (channel === 'candidate' && audioSourceRef.current !== 'microphone') { setStatus('Your side was transcribed'); return; }
     setQuestion(transcript);
     if (!isLikelyInterviewQuestion(transcript, contextRef.current?.session.locale ?? 'en')) { setStatus('Listening for a completed question'); return; }
     dispatchDetectedQuestion(transcript, 'final');
@@ -340,6 +342,7 @@ function App() {
 
   function scheduleReconnect(channel: Channel) {
     if (!activeRef.current || reconnectTimersRef.current[channel] || !navigator.onLine) return;
+    if (reconnectAttemptRef.current[channel] >= 5) { setCaptureError('Transcription could not reconnect. Retry audio to restore listening.'); void stopCapture('Transcription disconnected'); return; }
     const attempt = reconnectAttemptRef.current[channel] + 1;
     reconnectAttemptRef.current[channel] = attempt;
     setReconnectAttempts({ ...reconnectAttemptRef.current });
@@ -352,10 +355,10 @@ function App() {
       if (channel === 'candidate' && (!stream || stream.getAudioTracks().every((track) => track.readyState === 'ended'))) {
         try {
           micStreamRef.current?.getTracks().forEach((track) => track.stop());
-          stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+          stream = await acquireMicrophone();
           micStreamRef.current = stream; setMicConnected(true);
           if (micMonitorRef.current) { window.cancelAnimationFrame(micMonitorRef.current.frame); void micMonitorRef.current.audioContext.close(); micMonitorRef.current = null; }
-          startMicMonitor(stream);
+          if (!micBridgeRef.current) startMicMonitor(stream);
         } catch { setMicConnected(false); stream = null; }
       }
       if (!stream) return;
@@ -376,17 +379,25 @@ function App() {
       if (peer.connectionState === 'connected') { reconnectAttemptRef.current[channel] = 0; setReconnectAttempts({ ...reconnectAttemptRef.current }); }
       if (['failed', 'disconnected'].includes(peer.connectionState)) scheduleReconnect(channel);
     };
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const opened = new Promise<void>((resolve, reject) => {
-      const timeout = window.setTimeout(() => reject(new Error('The realtime channel timed out.')), 20_000);
-      events.onopen = () => { window.clearTimeout(timeout); resolve(); };
-      events.onerror = () => { window.clearTimeout(timeout); reject(new Error('The realtime event channel failed.')); };
+      timer = setTimeout(() => reject(new Error('The realtime channel timed out.')), 30_000);
+      events.onopen = () => resolve();
+      events.onerror = () => reject(new Error('The realtime event channel failed.'));
     });
-    const offer = await peer.createOffer(); await peer.setLocalDescription(offer);
-    const sdp = await fetch(credential.endpoint || 'https://api.openai.com/v1/realtime/calls', { method: 'POST', headers: { authorization: `Bearer ${credential.clientSecret}`, 'content-type': 'application/sdp' }, body: offer.sdp, signal: AbortSignal.timeout(30_000) });
-    const answer = await sdp.text();
-    if (!sdp.ok) throw new Error('OpenAI could not establish the live transcription channel. The session remains open so you can retry.');
-    await peer.setRemoteDescription({ type: 'answer', sdp: answer }); await opened;
-    channelsRef.current[channel] = { peer, events };
+    // Attach a handler immediately; negotiation can fail before awaiting open.
+    void opened.catch(() => undefined);
+    try {
+      const offer = await peer.createOffer(); await peer.setLocalDescription(offer);
+      const sdp = await fetch(credential.endpoint || 'https://api.openai.com/v1/realtime/calls', { method: 'POST', headers: { authorization: `Bearer ${credential.clientSecret}`, 'content-type': 'application/sdp' }, body: offer.sdp, signal: AbortSignal.timeout(25_000) });
+      const answer = await sdp.text();
+      if (!sdp.ok) throw new Error('The transcription service could not connect. Stop listening and retry.');
+      await peer.setRemoteDescription({ type: 'answer', sdp: answer }); await opened;
+      if (!stream.getAudioTracks().some(track => track.readyState === 'live')) throw new Error('The audio source was stopped.');
+      channelsRef.current[channel] = { peer, events };
+    } catch (error) {
+      events.onmessage = null; peer.onconnectionstatechange = null; events.close(); peer.close(); throw error;
+    } finally { clearTimeout(timer); }
   }
 
   function startMicMonitor(stream: MediaStream) {
@@ -397,22 +408,19 @@ function App() {
   }
 
   async function refreshSystemAudio(announce = false) {
-    if (desktopPreview) {
-      const next: SystemAudioStatus = { state: 'authorized', permissionGranted: true, captureActive: activeRef.current, reason: activeRef.current ? 'Preview audio is connected.' : 'System audio is ready.', diagnostics: null };
-      setSystemAudio(next); if (announce) setStatus(next.reason); return next;
-    }
+
     setSystemAudio((current) => ({ ...current, state: 'checking', reason: 'Checking macOS Screen & System Audio Recording access…' }));
     try { const next = await invoke<SystemAudioStatus>('system_audio_status'); setSystemAudio(next); if (announce) setStatus(next.reason); return next; }
     catch (error) { const message = realtimeFailure(error); const next: SystemAudioStatus = { ...initialSystemAudioStatus, state: 'captureFailed', reason: message }; setSystemAudio(next); if (announce) setStatus(message); return next; }
   }
   async function grantSystemAudio() {
-    if (desktopPreview) { const next = { ...initialSystemAudioStatus, state: 'authorized' as const, permissionGranted: true, reason: 'System audio access granted in preview.' }; setSystemAudio(next); setStatus(next.reason); return; }
+
     setSystemAudio((current) => ({ ...current, state: 'checking', reason: 'Opening the macOS permission request…' })); setStatus('Requesting Screen & System Audio Recording access…');
     try { const next = await invoke<SystemAudioStatus>('request_system_audio_permission'); setSystemAudio(next); setStatus(next.reason); }
     catch (error) { const message = realtimeFailure(error); setSystemAudio((current) => ({ ...current, state: 'captureFailed', reason: message })); setStatus(message); }
   }
   async function repairSystemAudio() {
-    if (desktopPreview) { const next = { ...initialSystemAudioStatus, state: 'authorized' as const, permissionGranted: true, reason: 'System audio access repaired in preview.' }; setSystemAudio(next); setStatus(next.reason); return; }
+
     setStatus('Resetting Torvi’s macOS permission record…');
     try { const next = await invoke<SystemAudioStatus>('repair_system_audio_permission'); setSystemAudio(next); setStatus(next.reason); }
     catch (error) { const message = realtimeFailure(error); setSystemAudio((current) => ({ ...current, state: 'captureFailed', reason: message })); setStatus(message); }
@@ -421,41 +429,57 @@ function App() {
     setSystemAudio((current) => ({ ...current, state: failure.state, permissionGranted: failure.state !== 'permissionRequired', captureActive: false, reason: `${failure.message} (${failure.category} · ${failure.stage}${failure.code == null ? '' : ` · ${failure.code}`})` })); setStatus(failure.message);
   }
 
+  async function acquireMicrophone(): Promise<MediaStream> {
+    if (!/Mac/i.test(navigator.platform)) return requestMicrophone();
+    await invoke('stop_microphone_capture');
+    await micBridgeRef.current?.close();
+    micBridgeRef.current = await createSystemAudioBridge();
+    // The helper reports ready only after receiving actual input-device frames.
+    // Set the teardown flag before the bounded native command can reject.
+    nativeMicStartedRef.current = true;
+    await invoke('start_microphone_capture');
+    return micBridgeRef.current.stream;
+  }
+
   async function startCapture() {
-    if (!contextRef.current) return setStatus('Prepare a live session in the Mac workspace first.');
-    const permission = await refreshSystemAudio();
-    if (permission.state === 'permissionRequired') return setStatus('System audio permission is required. Press Grant system audio once.');
-    if (permission.state === 'restartRequired') return setStatus('Quit Torvi completely and reopen it before starting system audio.');
-    if (desktopPreview) {
-      setSystemAudio({ ...permission, state: 'starting', reason: 'Connecting preview audio…' }); setStatus('Connecting preview audio…');
-      await new Promise((resolve) => window.setTimeout(resolve, 420));
-      activeRef.current = true; setActive(true); setSeconds(0); setSystemAudio({ ...permission, state: 'running', captureActive: true, reason: 'Preview audio is connected.' }); setStatus('Both transcription channels are live');
-      return;
+    if (!contextRef.current) { setLaunchOpen(true); await setAssistantPanel('expanded'); return; }
+    setCaptureError('');
+    if (audioSourceRef.current !== 'microphone') {
+      const permission = await refreshSystemAudio();
+      if (permission.state === 'permissionRequired') throw new Error('Screen Recording permission is required for system audio. Choose Microphone or enable access in Settings.');
+      if (permission.state === 'restartRequired') throw new Error('Restart Torvi once to apply Screen Recording access.');
+      setSystemAudio(await invoke<SystemAudioStatus>('start_audio_capture', { includeSystemAudio: true }));
+      nativeCaptureStartedRef.current = true;
+      systemAudioBridgeRef.current = await createSystemAudioBridge();
+      await connectRealtime('interviewer', systemAudioBridgeRef.current.stream);
     }
-    setSystemAudio((current) => ({ ...current, state: 'starting', reason: 'Starting ScreenCaptureKit…' })); setStatus('Starting native system audio…');
-    const capability = await invoke<{ systemAudio: boolean; microphone: boolean; backend: string }>('audio_capabilities');
-    if (!capability.systemAudio) throw new Error('System audio capture is unavailable on this computer.');
-    setSystemAudio(await invoke<SystemAudioStatus>('start_audio_capture', { includeSystemAudio: true })); nativeCaptureStartedRef.current = true;
-    const systemAudioBridge = await createSystemAudioBridge(); systemAudioBridgeRef.current = systemAudioBridge;
-    await connectRealtime('interviewer', systemAudioBridge.stream);
-    activeRef.current = true; setActive(true); setSeconds(0); setSourceVerified(false); setStreamingAnswer(''); updatePipelineMetrics({ source: 'partial' }); setStatus(`System audio transcription connected with ${capability.backend}`);
-    try {
-      const microphone = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-      micStreamRef.current = microphone; setMicConnected(true); startMicMonitor(microphone); await connectRealtime('candidate', microphone); setStatus('Both transcription channels are live');
-    } catch (error) { setStatus(`${realtimeFailure(error)} System audio remains live.`); }
+    if (audioSourceRef.current !== 'system') {
+      const microphone = await acquireMicrophone();
+      micStreamRef.current = microphone;
+      setMicConnected(true); setMicMuted(false);
+      if (!micBridgeRef.current) startMicMonitor(microphone);
+      await connectRealtime('candidate', microphone);
+    }
+    activeRef.current = true; setActive(true); setSeconds(0); setSourceVerified(false);
+    setGenerationError(''); setStatus('Listening');
   }
 
   async function stopCapture(nextStatus = 'Live audio paused', failure?: SystemAudioFailure) {
-    cancelActiveSuggestion();
-    if (!desktopPreview && (activeRef.current || nativeCaptureStartedRef.current || systemAudio.captureActive)) await invoke('stop_audio_capture').catch(() => undefined);
+    cancelActiveSuggestion(); setSuggestionLoading(false);
+    const stopNative = activeRef.current || nativeCaptureStartedRef.current;
     nativeCaptureStartedRef.current = false;
     activeRef.current = false; setActive(false); setLevel(0); setMicLevel(0); setSourceVerified(false);
+    const stopNativeMic = nativeMicStartedRef.current;
+    nativeMicStartedRef.current = false;
+    if (stopNativeMic) await invoke('stop_microphone_capture').catch(() => undefined);
     Object.values(reconnectTimersRef.current).forEach((timer) => window.clearTimeout(timer)); reconnectTimersRef.current = {};
     reconnectAttemptRef.current = { interviewer: 0, candidate: 0 }; setReconnectAttempts({ interviewer: 0, candidate: 0 });
     micStreamRef.current?.getTracks().forEach((track) => track.stop()); micStreamRef.current = null; setMicConnected(false);
+    const micBridge = micBridgeRef.current; micBridgeRef.current = null; await micBridge?.close().catch(() => undefined);
     if (micMonitorRef.current) { window.cancelAnimationFrame(micMonitorRef.current.frame); void micMonitorRef.current.audioContext.close(); micMonitorRef.current = null; }
     const systemAudioBridge = systemAudioBridgeRef.current; systemAudioBridgeRef.current = null; await systemAudioBridge?.close().catch(() => undefined);
     Object.values(channelsRef.current).forEach((channel) => channel?.peer.close()); channelsRef.current = {};
+    if (stopNative) await invoke('stop_audio_capture').catch(() => undefined);
     if (failure) { applyNativeAudioFailure(failure); return; }
     const nextAudio = await invoke<SystemAudioStatus>('system_audio_status').catch(() => null); if (nextAudio) setSystemAudio(nextAudio); setStatus(nextStatus);
   }
@@ -467,21 +491,21 @@ function App() {
       if (activeRef.current) await stopCapture();
       else await startCapture();
     }
-    catch (error) { const nativeFailure = nativeAudioFailure(error); await stopCapture(realtimeFailure(error), nativeFailure ?? undefined); }
+    catch (error) { setCaptureError(realtimeFailure(error)); const nativeFailure = nativeAudioFailure(error); await stopCapture(realtimeFailure(error), nativeFailure ?? undefined); }
     finally { captureBusyRef.current = false; setCaptureIntent('idle'); }
   }
 
   async function runCapturePrimaryAction() {
     if (captureBusyRef.current || finishing) return;
     if (activeRef.current) return toggleCapture();
-    if (systemAudio.state === 'permissionRequired') return grantSystemAudio();
-    if (systemAudio.state === 'restartRequired') { relaunchApp(); return; }
-    if (systemAudio.state === 'captureFailed') { await refreshSystemAudio(true); return; }
+    if (audioSource !== 'microphone' && systemAudio.state === 'permissionRequired') return grantSystemAudio();
+    if (audioSource !== 'microphone' && systemAudio.state === 'restartRequired') { relaunchApp(); return; }
+    if (audioSource !== 'microphone' && systemAudio.state === 'captureFailed') { await refreshSystemAudio(true); }
     return toggleCapture();
   }
 
   function emitTiming(event: 'question.detected' | 'transcription.delta' | 'suggestion.first_useful' | 'generation.failed', durationMs: number | null, status: 'ready' | 'warning' | 'failed' | 'success' = 'success') {
-    if (desktopPreview || durationMs == null || !contextRef.current) return;
+    if (durationMs == null || !contextRef.current) return;
     void desktopApi('POST', '/api/v1/telemetry', {
       event, platform: 'macos', durationMs, status, appVersion: desktopAppVersion,
       locale: contextRef.current.session.locale, mode: contextRef.current.session.mode,
@@ -489,6 +513,7 @@ function App() {
   }
 
   function cancelActiveSuggestion() {
+    suggestionIntentRef.current += 1;
     const current = activeSuggestionRef.current;
     if (!current) return;
     activeSuggestionRef.current = null;
@@ -520,8 +545,13 @@ function App() {
       return;
     }
     if (event.type === 'suggestion.final' && event.suggestion) {
+      const parsed = suggestionSchema.safeParse(event.suggestion);
+      if (!parsed.success) {
+        cancelActiveSuggestion(); setSuggestionLoading(false); setStreamingAnswer('');
+        setGenerationError('The AI returned an invalid response. Please retry.'); return;
+      }
       current.metrics.completedAt = eventTimestamp();
-      setSuggestion(event.suggestion);
+      setSuggestion(parsed.data);
       setStreamingAnswer('');
       setLastResponseMode(event.suggestion.responseMode ?? 'concise');
       setSuggestionLoading(false);
@@ -535,16 +565,23 @@ function App() {
       setSuggestionLoading(false);
       setStreamingAnswer('');
       emitTiming('generation.failed', elapsed(current.metrics.suggestionRequestedAt, eventTimestamp()), 'failed');
-      setStatus(event.message || 'The coaching service could not complete this answer. Retry keeps the session open.');
+      const message = event.message || 'The assistant could not complete this answer. Please retry.';
+      setGenerationError(message); setStatus(message);
     }
   }
 
   async function askCoach(nextQuestion = questionRef.current, responseMode: 'tiny' | 'concise' | 'standard' | 'detailed' = 'concise', source: PipelineMetrics['source'] = 'manual') {
-    if (!contextRef.current || nextQuestion.trim().length < 2) return setStatus('Wait for a question or type one before asking the copilot.');
+    if (!contextRef.current) { setLaunchOpen(true); await setAssistantPanel('expanded'); return; }
+    if (nextQuestion.trim().length < 2) return;
+    if (!navigator.onLine) { setGenerationError('You’re offline. Reconnect and retry.'); return; }
+    cancelActiveSuggestion();
+    const intent = suggestionIntentRef.current;
+    setGenerationError(''); setSuggestionLoading(true);
     const liveScreenContext = source === 'manual' && screenContextEnabled
       ? await captureCurrentScreen()
-      : screenAnalysis;
-    cancelActiveSuggestion();
+      : null;
+    if (intent !== suggestionIntentRef.current) return;
+    if (source === 'manual' && screenContextEnabled && !liveScreenContext) { setSuggestionLoading(false); setGenerationError('Screen context was unavailable. Enable Screen Recording in Settings, or turn Screen off and retry.'); return; }
     const now = eventTimestamp();
     const metrics: PipelineMetrics = source === 'manual'
       ? { source, questionDetectedAt: now, suggestionRequestedAt: now }
@@ -567,7 +604,7 @@ function App() {
       }
     } catch (error) {
       if (activeSuggestionRef.current?.requestId !== requestId) return;
-      activeSuggestionRef.current = null; setStreamingAnswer(''); setStatus(realtimeFailure(error));
+      activeSuggestionRef.current = null; setStreamingAnswer(''); setGenerationError(realtimeFailure(error)); setStatus(realtimeFailure(error));
       emitTiming('generation.failed', elapsed(metrics.suggestionRequestedAt, eventTimestamp()), 'failed');
     } finally {
       if (activeSuggestionRef.current?.requestId === requestId) activeSuggestionRef.current = null;
@@ -581,12 +618,8 @@ function App() {
   function chooseAnswerLayer(layer: AnswerLayer) { setAnswerLayer(layer); if (layer === 'deep' && suggestion && lastResponseMode !== 'detailed') void askCoach(question, 'detailed'); }
 
   async function captureCurrentScreen(): Promise<string | null> {
-    if (desktopPreview) {
-      const preview = 'Visible screen: a weekly product meeting with a launch timeline, two open risks, and an unassigned follow-up.';
-      setScreenAnalysis(preview);
-      return preview;
-    }
-    setScreenAnalyzing(true); setStatus('Reading the primary screen once…');
+
+    setScreenAnalyzing(true); setStatus('Reading the display under your pointer once…');
     try {
       const image = await invoke<ScreenContextImage>('capture_primary_screen', { restoreProtected: privateOverlay });
       const result = await invoke<{ analysis: string; retained: boolean }>('desktop_screen_context', { bytes: image.bytes, contentType: image.contentType });
@@ -607,11 +640,12 @@ function App() {
   }
 
   async function finish(choice: 'save' | 'discard') {
-    setFinishing(true); await stopCapture('Finishing session…');
+    if (finishing) return;
+    setFinishing(true);
     try {
+      await stopCapture('Finishing session…');
       await invoke('desktop_finish', { choice, liveSeconds: seconds, segments: segmentsRef.current });
-      if (focusMode) await toggleFocusMode();
-      setContext(null); setSuggestion(null); setQuestion('Ask anything about your screen or conversation…'); setSegments([]); setBrain(null); setCaptures([]); setScreenAnalysis(''); setSurface('workspace');
+      setContext(null); setSuggestion(null); setQuestion(''); setSegments([]); setBrain(null); setCaptures([]); setScreenAnalysis(''); setSurface('live');
       setStatus(choice === 'save' ? 'Session saved — notes and follow-through are ready' : 'Session discarded — transcript deleted');
     } catch (error) { setStatus(realtimeFailure(error)); }
     finally { setFinishing(false); }
@@ -619,8 +653,7 @@ function App() {
 
   async function signOut() {
     await stopCapture();
-    if (focusMode) await toggleFocusMode();
-    await invoke('disconnect_desktop'); setContext(null); setAccount(null); setSurface('workspace'); setStatus('Signed out from this Mac');
+    await invoke('disconnect_desktop'); setContext(null); setAccount(null); setSurface('live'); setStatus('Signed out from this Mac');
   }
 
   function startWindowDrag(event: React.MouseEvent<HTMLElement>) {
@@ -641,12 +674,13 @@ function App() {
     } catch (error) { setStatus(`Private Overlay could not change: ${realtimeFailure(error)}`); }
   }
   async function resizeAssistant(panelState: AssistantPanelState, size = assistantPreferencesRef.current.assistantSize) {
-    if (desktopPreview) return;
+
     const expandedSizes: Record<AssistantSize, [number, number]> = {
       compact: [440, 390], standard: [500, 500], expanded: [560, 620],
     };
     const [width, height] = panelState === 'collapsed' ? [460, 58] : expandedSizes[size];
     await getCurrentWindow().setSize(new LogicalSize(width, height));
+    await windowStateRef.current?.ensureVisible();
   }
 
   async function setAssistantPanel(next: AssistantPanelState, focusPrompt = false) {
@@ -661,6 +695,7 @@ function App() {
 
   async function toggleFocusMode(force?: boolean) {
     const next = force ?? !focusModeRef.current;
+
     if (next === focusModeRef.current) {
       if (next) await setAssistantPanel(panelStateRef.current);
       return;
@@ -686,23 +721,28 @@ function App() {
   async function returnToWorkspace() {
     if (focusModeRef.current) await toggleFocusMode(false);
     setSurface('workspace');
+    await getCurrentWindow().setSize(new LogicalSize(920, 720));
   }
 
   async function activateAssistant() {
     await getCurrentWindow().show().catch(() => undefined);
-    if (!contextRef.current) {
-      setSurface('workspace');
-      await getCurrentWindow().setFocus().catch(() => undefined);
-      setStatus('Prepare a session to use the floating assistant');
-      return;
-    }
     setSurface('live');
     if (!focusModeRef.current) await toggleFocusMode(true);
-    await setAssistantPanel('collapsed', true);
+    await setAssistantPanel('expanded', true);
+  }
+
+  async function askOrOpenAssistant() {
+    if (document.hasFocus() && panelStateRef.current === 'expanded' && questionRef.current.trim().length >= 2) {
+      await askRef.current(questionRef.current);
+    } else {
+      await activateAssistant();
+    }
   }
 
   function clearAssistantThread() {
     cancelActiveSuggestion();
+    setSuggestionLoading(false);
+    setGenerationError('');
     setQuestion('');
     setPartial('');
     setSuggestion(null);
@@ -770,7 +810,7 @@ function App() {
 
   React.useEffect(() => { toggleRef.current = toggleCapture; askRef.current = askCoach; focusRef.current = toggleFocusMode; layerRef.current = moveAnswerLayer; opacityRef.current = adjustAssistantOpacity; });
   React.useEffect(() => {
-    if (desktopPreview) return;
+
     const windowState = new WindowStateManager();
     windowStateRef.current = windowState;
     void windowState.init().then(({ mode, density: savedDensity, preferences, shortcuts: savedShortcuts, desktopPreferences: savedDesktopPreferences }) => {
@@ -780,14 +820,14 @@ function App() {
       shortcutsRef.current = savedShortcuts;
       setShortcuts(savedShortcuts);
       setDesktopPreferences(savedDesktopPreferences);
-      focusModeRef.current = mode === 'focus';
-      setFocusMode(mode === 'focus');
+      focusModeRef.current = true;
+      setFocusMode(true);
       return Promise.all([
-        invoke('configure_focus_mode', { enabled: mode === 'focus', clickThrough: mode === 'focus' && clickThrough }),
-        mode === 'focus' ? resizeAssistant(panelStateRef.current, preferences.assistantSize) : Promise.resolve(),
+        invoke('configure_focus_mode', { enabled: true, clickThrough: false }),
+        resizeAssistant('collapsed', preferences.assistantSize).then(() => getCurrentWindow().show()),
       ]);
-    }).catch(() => setStatus('Window state could not be restored; resizing still works normally.'));
-    const restoreTimer = window.setTimeout(() => { if (!desktopPreview) void restoreConnection(); }, 0); const audioStatusTimer = window.setTimeout(() => { if (!desktopPreview) void refreshSystemAudio(); }, 0);
+    }).catch(error => { setGenerationError(realtimeFailure(error)); void getCurrentWindow().show(); });
+    const restoreTimer = window.setTimeout(() => { void restoreConnection(); }, 0); const audioStatusTimer = window.setTimeout(() => { void refreshSystemAudio(); }, 0);
     const handleWindowFocus = () => { if (!activeRef.current) void refreshSystemAudio(); else (['interviewer', 'candidate'] as Channel[]).forEach((channel) => { const state = channelsRef.current[channel]?.peer.connectionState; if (state && ['failed', 'disconnected'].includes(state)) scheduleReconnect(channel); }); };
     const handleOnline = () => { setOnline(true); setStatus('Network restored — reconnecting live channels'); (['interviewer', 'candidate'] as Channel[]).forEach(scheduleReconnect); };
     const handleOffline = () => { setOnline(false); setStatus('Network unavailable — the session remains open and will reconnect automatically'); };
@@ -806,24 +846,35 @@ function App() {
     window.addEventListener('focus', handleWindowFocus); window.addEventListener('online', handleOnline); window.addEventListener('offline', handleOffline); window.addEventListener('keydown', handleKeys); navigator.mediaDevices?.addEventListener('devicechange', handleDevices);
     let disposed = false; const cleanup: Array<() => void> = [];
     Promise.all([
-      listen<AudioChunk>('native-audio-chunk', ({ payload }) => { if (disposed || !activeRef.current) return; lastNativeAudioAtRef.current = eventTimestamp(); const samples = decodeAudioChunk(payload); const nextLevel = chunkLevel(samples); setLevel(nextLevel); if (nextLevel > 0.015) { setSourceVerified(true); setStatus('System audio verified — listening for questions'); } if (systemAudioBridgeRef.current && !systemAudioBridgeRef.current.push(samples, payload.sampleRate)) setDroppedChunks((value) => value + 1); }).then((unlisten) => cleanup.push(unlisten)),
-      listen<SystemAudioFailure>('native-audio-error', ({ payload }) => { if (!disposed) void stopCapture(payload.message || 'System audio capture stopped.', payload); }).then((unlisten) => cleanup.push(unlisten)),
-      listen<SuggestionChunk>('desktop-suggestion-chunk', ({ payload }) => { const current = activeSuggestionRef.current; if (!disposed && current?.requestId === payload.requestId) current.parser.feed(payload.bytes, (event) => handleSuggestionStreamEvent({ ...event, requestId: payload.requestId })); }).then((unlisten) => cleanup.push(unlisten)),
+      listen<AudioChunk>('native-audio-chunk', ({ payload }) => { if (disposed || !activeRef.current) return; lastNativeAudioAtRef.current = eventTimestamp(); const samples = decodeAudioChunk(payload); const nextLevel = chunkLevel(samples); setLevel(nextLevel); if (nextLevel > 0.015) { setSourceVerified(true);  } if (systemAudioBridgeRef.current && !systemAudioBridgeRef.current.push(samples, payload.sampleRate)) setDroppedChunks((value) => value + 1); }).then((unlisten) => { if (disposed) unlisten(); else cleanup.push(unlisten); }),
+      listen<SystemAudioFailure>('native-audio-error', ({ payload }) => { if (!disposed && activeRef.current) { setCaptureError(payload.message || 'System audio stopped. Retry audio.'); void stopCapture(payload.message || 'System audio capture stopped.', payload); } }).then((unlisten) => { if (disposed) unlisten(); else cleanup.push(unlisten); }),
+      listen('native-audio-ended', () => { if (!disposed && activeRef.current && nativeCaptureStartedRef.current) { setCaptureError('System audio disconnected. Retry audio.'); void stopCapture('System audio disconnected'); } }).then((unlisten) => { if (disposed) unlisten(); else cleanup.push(unlisten); }),
+      listen<AudioChunk>('native-microphone-chunk', ({ payload }) => {
+        if (disposed || !activeRef.current || !nativeMicStartedRef.current) return;
+        const samples = decodeAudioChunk(payload);
+        const enabled = micStreamRef.current?.getAudioTracks()[0]?.enabled !== false;
+        setMicLevel(enabled ? chunkLevel(samples) : 0);
+        if (enabled && micBridgeRef.current && !micBridgeRef.current.push(samples, payload.sampleRate)) setDroppedChunks(value => value + 1);
+      }).then(unlisten => { if (disposed) unlisten(); else cleanup.push(unlisten); }),
+      listen<string>('native-microphone-error', ({ payload }) => { if (!disposed && activeRef.current && nativeMicStartedRef.current) { setCaptureError(payload); void stopCapture(payload); } }).then(unlisten => { if (disposed) unlisten(); else cleanup.push(unlisten); }),
+      listen('native-microphone-ended', () => { if (!disposed && activeRef.current && nativeMicStartedRef.current) { setCaptureError('Microphone disconnected. Retry audio.'); void stopCapture('Microphone disconnected'); } }).then(unlisten => { if (disposed) unlisten(); else cleanup.push(unlisten); }),
+      listen<SuggestionChunk>('desktop-suggestion-chunk', ({ payload }) => { const current = activeSuggestionRef.current; if (!disposed && current?.requestId === payload.requestId) current.parser.feed(payload.bytes, (event) => handleSuggestionStreamEvent({ ...event, requestId: payload.requestId })); }).then((unlisten) => { if (disposed) unlisten(); else cleanup.push(unlisten); }),
     ]).catch(() => setStatus('A native event listener could not start. Restart Torvi to try again.'));
-    void invoke('configure_share_safe_overlay', { enabled: false });
+    void invoke('configure_share_safe_overlay', { enabled: false }).catch(error => setGenerationError(realtimeFailure(error)));
     return () => { window.clearTimeout(restoreTimer); window.clearTimeout(audioStatusTimer); if (partialQuestionTimerRef.current != null) window.clearTimeout(partialQuestionTimerRef.current); cancelActiveSuggestion(); window.removeEventListener('focus', handleWindowFocus); window.removeEventListener('online', handleOnline); window.removeEventListener('offline', handleOffline); window.removeEventListener('keydown', handleKeys); navigator.mediaDevices?.removeEventListener('devicechange', handleDevices); disposed = true; cleanup.forEach((dispose) => dispose()); void windowState.dispose(); void stopCapture(); };
     // Native listeners are installed once; current values are held in refs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   React.useEffect(() => {
-    if (desktopPreview) return;
+
     let disposed = false;
     const shortcutManager = shortcutManagerRef.current;
     void shortcutManager.update(shortcuts, {
-      toggleAssistant: () => { void activateAssistant(); },
+      toggleAssistant: () => { void askOrOpenAssistant(); },
       toggleListening: () => { void toggleRef.current(); },
-      hideAssistant: () => { void hideWindow(); },
-      toggleOverlay: () => { void focusRef.current(); },
+      hideAssistant: () => { void getCurrentWindow().isVisible().then(visible => visible ? hideWindow() : activateAssistant()); },
+      toggleOverlay: () => { void activateAssistant(); },
+      dismissAssistant: () => { void setAssistantPanel('collapsed'); },
       clearThread: clearAssistantThread,
       captureContext: () => { setScreenContextEnabled(true); setStatus('Screen context enabled for the next request'); void activateAssistant(); },
     }).then((conflicts) => {
@@ -840,10 +891,10 @@ function App() {
 
   const sources = (context?.documents.length ?? 0) + (context?.target?.jobDescription ? 1 : 0);
   const systemAudioLabel: Record<SystemAudioState, string> = { unknown: 'Not checked', checking: 'Checking…', permissionRequired: 'Permission required', restartRequired: 'Restart required', authorized: 'Ready', starting: 'Starting…', running: sourceVerified ? 'Sound detected' : 'Waiting for sound', captureFailed: 'Capture failed' };
-  const captureBusy = captureIntent !== 'idle' || systemAudio.state === 'checking' || systemAudio.state === 'starting';
-  const captureActionKind: 'start' | 'stop' | 'permission' | 'restart' | 'retry' = active ? 'stop' : systemAudio.state === 'permissionRequired' ? 'permission' : systemAudio.state === 'restartRequired' ? 'restart' : systemAudio.state === 'captureFailed' ? 'retry' : 'start';
-  const captureActionLabel = active ? (captureIntent === 'stopping' ? 'Stopping…' : 'Stop listening') : captureBusy ? 'Starting…' : captureActionKind === 'permission' ? 'Grant audio access' : captureActionKind === 'restart' ? 'Restart Torvi' : captureActionKind === 'retry' ? 'Retry audio check' : 'Start assistant';
-  const captureActionHint = active ? 'Torvi is hearing the conversation and generating live assistance.' : captureActionKind === 'permission' ? 'macOS needs explicit Screen & System Audio Recording access before Torvi can listen.' : captureActionKind === 'restart' ? 'Torvi must restart once so macOS can apply the new audio permission.' : captureActionKind === 'retry' ? 'The last audio check failed. Retry it without losing the prepared session.' : 'Start live system audio and optional microphone transcription.';
+  const captureBusy = captureIntent !== 'idle' || (audioSource !== 'microphone' && (systemAudio.state === 'checking' || systemAudio.state === 'starting'));
+  const captureActionKind: 'start' | 'stop' | 'permission' | 'restart' | 'retry' = active ? 'stop' : audioSource === 'microphone' ? 'start' : systemAudio.state === 'permissionRequired' ? 'permission' : systemAudio.state === 'restartRequired' ? 'restart' : systemAudio.state === 'captureFailed' ? 'retry' : 'start';
+  const captureActionLabel = active ? (captureIntent === 'stopping' ? 'Stopping…' : 'Stop listening') : captureBusy ? 'Starting…' : captureActionKind === 'permission' ? 'Grant audio access' : captureActionKind === 'restart' ? 'Restart Torvi' : captureActionKind === 'retry' ? 'Retry audio check' : 'Listen';
+  const captureActionHint = active ? 'Torvi is hearing the conversation and generating live assistance.' : captureActionKind === 'permission' ? 'macOS needs explicit Screen & System Audio Recording access before Torvi can listen.' : captureActionKind === 'restart' ? 'Torvi must restart once so macOS can apply the new audio permission.' : captureActionKind === 'retry' ? 'The last audio check failed. Retry it without losing the prepared session.' : audioSource === 'microphone' ? 'Start live microphone transcription.' : audioSource === 'system' ? 'Start live system audio transcription.' : 'Start live microphone and system audio transcription.';
   const selectedMemory = suggestion?.grounding.verifiedClaimIds.flatMap((id) => brain?.brain.verifiedMemory.find((item) => item.claimId === id) ?? []).at(0) ?? null;
   const isMeeting = context?.session.mode === 'meeting';
   const isConversationMode = context ? !modeRequiresVerifiedResume(context.session.mode) : false;
@@ -855,24 +906,32 @@ function App() {
   const firstRenderLatency = elapsed(pipelineMetrics.suggestionRequestedAt, pipelineMetrics.renderedAt);
   const completionLatency = elapsed(pipelineMetrics.suggestionRequestedAt, pipelineMetrics.completedAt);
 
-  function answerContent() {
-    if (streamingAnswer) return <p className="streaming-answer">{streamingAnswer}<i aria-label="Streaming answer" /></p>;
-    if (!suggestion) return <div className="answer-placeholder"><i>✦</i><b>{suggestionLoading ? 'Preparing a grounded answer…' : active ? 'Listening for a completed question' : 'Start live audio when the conversation begins'}</b><p>{suggestionLoading ? 'Retrieving the strongest verified experience and shaping it into a speakable response.' : 'Questions are detected automatically. You can also type a question and press Ask AI.'}</p></div>;
-    if (answerLayer === 'five') return <p className="five-answer">{suggestion.directAnswer || suggestion.answer}</p>;
-    if (answerLayer === 'twenty') return <div className="twenty-answer">{(suggestion.supportingPoints.length ? suggestion.supportingPoints : suggestion.bullets).map((point, index) => <p key={`${point}:${index}`}><i>{index + 1}</i><span>{point}</span></p>)}</div>;
-    if (answerLayer === 'sixty') return <p className="sixty-answer">{suggestion.expandedAnswer || [suggestion.directAnswer, ...suggestion.supportingPoints].filter(Boolean).join(' ')}</p>;
-    return <div className="deep-answer"><p>{suggestion.expandedAnswer || suggestion.directAnswer}</p>{suggestion.challengeability.reasons.length > 0 && <article><span>Evidence and challenge readiness</span>{suggestion.challengeability.reasons.map((reason) => <p key={reason}>◇ {reason}</p>)}</article>}{suggestion.citations.length > 0 && <article><span>Context used</span>{suggestion.citations.map((citation) => <p key={citation.documentId}><b>{citation.label}</b> — {citation.excerpt}</p>)}</article>}{suggestion.grounding.unsupportedElements.length > 0 && <article className="evidence-gap"><span>Missing evidence</span>{suggestion.grounding.unsupportedElements.map((item) => <p key={item}>! {item}</p>)}</article>}</div>;
-  }
-
-  return <main className={`app-frame surface-${surface} density-${density} appearance-${assistantPreferences.appearanceMode} ${focusMode ? 'focus-mode' : ''} ${privateOverlay ? 'private-overlay' : ''}`} style={frameStyle}>
-    <header className="global-titlebar window-drag-region" onMouseDown={startWindowDrag}><div className="mark"><i /><i /><i /></div><div className="global-brand"><b>Torvi</b><span>{surface === 'live' && context ? `${context.target?.role ?? statusCopy(context.session.mode)}${context.target?.company ? ` · ${context.target.company}` : ''}` : `Native workspace · v${desktopAppVersion}`}</span></div>{surface === 'live' && <div className={`live-status ${active ? 'active' : ''} ${online ? '' : 'offline'}`}><i />{status}</div>}<div className="window-actions" data-no-drag>{surface === 'live' && <button onClick={() => void returnToWorkspace()}>Workspace</button>}{surface === 'live' && <button className={focusMode ? 'active' : ''} title="Overlay (⌘⇧S)" onClick={() => void toggleFocusMode()}>Overlay</button>}<button title="Hide (⌘⇧H)" onClick={() => void hideWindow()}>Hide</button><button className="quit" disabled={finishing} title="Quit (⌘Q)" onClick={quitApp}>Quit</button></div></header>
-
-    {surface === 'workspace' ? <ControlCenter account={account} activeContext={context} appVersion={desktopAppVersion} preview={desktopPreview} assistantPreferences={assistantPreferences} desktopPreferences={desktopPreferences} shortcuts={shortcuts} shortcutConflicts={shortcutConflicts} onAssistantPreferencesChange={changeAssistantPreferences} onDesktopPreferencesChange={changeDesktopPreferences} onShortcutChange={changeShortcut} onResetShortcuts={resetShortcuts} onResetWindowPosition={resetWindowPosition} onResetAssistantAppearance={resetAssistantAppearance} onAuthenticated={setAccount} onOpenLive={() => context && void openLiveOverlay()} onSessionPrepared={(next) => { setContext(next); setCopilotMode(next.session.mode); setSegments([]); setSuggestion(null); setStreamingAnswer(''); setQuestion('Ask anything about your screen or conversation…'); void openLiveOverlay(); }} onSignOut={signOut} setStatus={setStatus} /> : context ? <section className={`live-workspace ${isConversationMode ? 'conversation-workspace' : 'interview-workspace'}`}>
-      {focusMode && <AssistantOverlay
+  return <main className={`app-frame surface-${surface} appearance-${assistantPreferences.appearanceMode} ${surface === 'live' ? 'focus-mode' : ''}`} style={frameStyle}>
+    {surface === 'workspace' ? <>
+      <header className="management-header window-drag-region" onMouseDown={startWindowDrag}><b>Torvi <small>{desktopAppVersion}</small></b><button onClick={() => void openLiveOverlay()}>Back to assistant</button></header>
+      <React.Suspense fallback={<p>Opening settings…</p>}><ControlCenter account={account} activeContext={context} initialView="settings" appVersion={desktopAppVersion} assistantPreferences={assistantPreferences} desktopPreferences={desktopPreferences} shortcuts={shortcuts} shortcutConflicts={shortcutConflicts} onAssistantPreferencesChange={changeAssistantPreferences} onDesktopPreferencesChange={changeDesktopPreferences} onShortcutChange={changeShortcut} onResetShortcuts={resetShortcuts} onResetWindowPosition={resetWindowPosition} onResetAssistantAppearance={resetAssistantAppearance} onAuthenticated={setAccount} onOpenLive={() => context && void openLiveOverlay()} onSessionPrepared={(next) => { setContext(next); setCopilotMode(next.session.mode); setSegments([]); setSuggestion(null); setStreamingAnswer(''); setQuestion(''); void openLiveOverlay(); }} onSignOut={signOut} setStatus={setStatus} /></React.Suspense>
+    </> : <AssistantOverlay
+        generationError={generationError}
+        captureError={captureError}
+        leadingContent={launchOpen ? <SessionLauncher account={account} onAuthenticated={setAccount} onCancel={() => setLaunchOpen(false)} onReady={next => { contextRef.current = next; setContext(next); setCopilotMode(next.session.mode); setLaunchOpen(false); setStatus('Ready'); }} /> : null}
+        auxiliaryControls={<>
+          {active && micConnected && <label><input type="checkbox" checked={micMuted} onChange={event => { const muted = event.target.checked; micStreamRef.current?.getAudioTracks().forEach(track => { track.enabled = !muted; }); setMicMuted(muted); }} />Mute microphone</label>}
+          <button onClick={() => void invoke('open_privacy_settings', { permission: 'microphone' }).catch(error => setGenerationError(realtimeFailure(error)))}>Microphone permission settings</button>
+          <details><summary>Screen & system audio</summary><p>{systemAudio.reason}</p><button onClick={() => void grantSystemAudio()}>Grant system audio</button><button onClick={() => void invoke('open_privacy_settings', { permission: 'screen' }).catch(error => setGenerationError(realtimeFailure(error)))}>Open Screen Recording settings</button>{systemAudio.state === 'restartRequired' && <button onClick={relaunchApp}>Restart Torvi</button>}<details><summary>System audio diagnostics</summary><p>{systemAudio.diagnostics?.signingStable ? 'Stable signing identity' : 'Signing not verified'}</p><p>{systemAudio.diagnostics?.lastStage}</p><button onClick={() => { if (window.confirm('Reset Torvi’s Screen Recording permission? You will need to grant access again.')) void repairSystemAudio(); }}>Reset permission record (advanced)</button></details></details>
+          <details><summary>Live transcript ({segments.length})</summary>{segments.length ? segments.slice(-30).map(segment => <p key={segment.id}><b>{segment.speaker === 'candidate' ? 'You' : 'Other side'}: </b>{segment.text}</p>) : <p>Start listening to see the conversation here.</p>}</details>
+          <label>Audio source<select aria-label="Audio source" disabled={active || captureBusy} value={audioSource} onChange={event => setAudioSource(event.target.value as typeof audioSource)}><option value="microphone">Microphone</option><option value="both">Microphone + system</option><option value="system">System audio</option></select></label>
+          <label><input type="checkbox" checked={screenContextEnabled} onChange={event => setScreenContextEnabled(event.target.checked)} />Use screen on Ask</label><small>Captures the display under your pointer, excluding Torvi. Sent only when you ask.</small>
+          <label><input type="checkbox" checked={privateOverlay} onChange={event => void setOverlayPrivacy(event.target.checked)} />Protect from supported screen capture</label><small>Native protection is best effort; modern capture tools may still include Torvi.</small>
+          {context && <button disabled={finishing} onClick={() => void finish('save')}>{finishing ? 'Saving…' : 'End and save notes'}</button>}
+          {context && <button disabled={finishing} onClick={() => { if (window.confirm('Discard this session and its transcript?')) void finish('discard'); }}>Discard session</button>}
+          <button onClick={() => void returnToWorkspace()}>Settings, context & history</button><button onClick={quitApp}>Quit Torvi</button><small>Torvi {desktopAppVersion} · {__TORVI_BUILD_ID__}</small>
+        </>}
+        onCancel={() => { cancelActiveSuggestion(); setSuggestionLoading(false); setStreamingAnswer(''); setStatus('Response stopped. You can ask again.'); }}
         panelState={assistantPanelState}
         focusRequest={assistantFocusRequest}
         shortcut={shortcuts.toggleAssistant}
         active={active}
+        muted={micMuted}
         online={online}
         mode={copilotMode}
         question={partial || question}
@@ -902,28 +961,7 @@ function App() {
         onClose={() => void returnToWorkspace()}
         onDragStart={startWindowDrag}
       />}
-      <div className="live-context"><div><span>{isMeeting ? 'Meeting' : 'Live session'}</span><b>{context.target?.role ?? statusCopy(context.session.mode)}{context.target?.company ? ` at ${context.target.company}` : ''}</b></div><div><span>Mode</span><b>{statusCopy(copilotMode)}</b></div><div><span>Context</span><b>{sources} sources · {brain?.brain.verifiedMemory.length ?? 0} verified memories</b></div><time>{String(Math.floor(seconds / 60)).padStart(2, '0')}:{String(seconds % 60).padStart(2, '0')}</time></div>
-
-      <section className={`audio-ribbon state-${systemAudio.state}`}>
-        <div className="channel-health"><span><i className={systemAudio.state === 'running' ? 'ready' : ''} />System audio <b>{systemAudioLabel[systemAudio.state]}</b></span><div className="meter"><i style={{ width: `${Math.max(active ? 3 : 0, Math.round(level * 100))}%` }} /></div></div>
-        <div className="channel-health"><span><i className={micConnected ? 'ready' : ''} />Microphone <b>{micConnected ? 'Connected' : 'Optional'}</b></span><div className="meter"><i style={{ width: `${Math.round(micLevel * 100)}%` }} /></div></div>
-        <small>{online ? active ? `Both channels are ephemeral · ${droppedChunks} overloaded chunks dropped · no audio stored` : systemAudio.reason : 'Network offline · session preserved · reconnects automatically'}</small>
-        {systemAudio.state === 'permissionRequired' ? <button onClick={() => void grantSystemAudio()}>Grant system audio</button> : systemAudio.state === 'restartRequired' ? <button onClick={relaunchApp}>Restart Torvi</button> : systemAudio.state === 'captureFailed' ? <button onClick={() => void refreshSystemAudio(true)}>Retry check</button> : null}
-        {systemAudio.diagnostics && <details className="system-audio-diagnostics"><summary>System audio diagnostics</summary><span>Permission: {systemAudio.diagnostics.preflightGranted ? 'granted' : 'not granted'}</span><span>Signing: {systemAudio.diagnostics.signingStable ? 'stable' : 'development identity'}</span><span>App location: {systemAudio.diagnostics.executablePath.startsWith('/Applications/') ? 'Applications' : 'move Torvi to Applications'}</span><span>Last stage: {statusCopy(systemAudio.diagnostics.lastStage)}</span><span>macOS: {systemAudio.diagnostics.macosVersion}</span>{systemAudio.state === 'permissionRequired' ? <button title="Use only if macOS has a stale Torvi permission entry" onClick={() => void repairSystemAudio()}>Reset permission record (advanced)</button> : null}</details>}
-      </section>
-
-      <div className="live-stage"><section className="live-primary"><div className="question-block"><header><span>{partial ? 'Hearing the conversation…' : 'Ask about your screen or conversation'}</span>{partial && <i>Live</i>}</header><textarea aria-label="Detected or typed request" value={partial || question} onChange={(event) => { setPartial(''); setQuestion(event.target.value); }} /></div><article className="answer-workbench"><header><div><span>Live answer</span><b>{suggestion ? `${suggestion.grounding.level} grounding · ${suggestion.grounding.verifiedClaimIds.length} verified memories` : screenContextEnabled ? 'Screen-aware on Ask' : 'Conversation context'}</b></div>{suggestion && <em className={suggestion.challengeability.label}>{statusCopy(suggestion.challengeability.label)}</em>}</header><nav className="answer-layer-tabs">{answerLayers.map((item) => <button key={item.id} className={answerLayer === item.id ? 'active' : ''} onClick={() => chooseAnswerLayer(item.id)}><b>{item.label}</b><small>{item.hint}</small></button>)}</nav>{suggestion?.recommendation !== 'answer' && suggestion ? <aside className="grounding-advice"><b>{suggestion.recommendation === 'clarify_first' ? 'Clarify first' : suggestion.recommendation === 'closest_verified_example' ? 'Closest real experience' : 'No verified personal example'}</b><span>{suggestion.clarificationSuggestion ?? suggestion.caution ?? 'Use a truthful general answer without presenting it as personal history.'}</span></aside> : null}<div className={`answer-content layer-${answerLayer}`}>{answerContent()}</div>{selectedMemory && <div className="source-experience"><i>◇</i><span><small>Using verified memory</small><b>{selectedMemory.experienceTitle}{selectedMemory.company ? ` · ${selectedMemory.company}` : ''}</b><em>{statusCopy(selectedMemory.claimType)}</em></span></div>}{screenAnalysis && <details className="screen-context-result" open><summary>Screen context · screenshot discarded</summary><p>{screenAnalysis}</p></details>}</article>
-
-        {!isMeeting && <section className="followup-rail"><header><span>Likely follow-ups</span><small>Choose one to prepare immediately</small></header>{suggestion?.likelyFollowUps.length ? suggestion.likelyFollowUps.map((item) => <button key={item.question} onClick={() => { setQuestion(item.question); void askCoach(item.question, 'concise'); }}><span><b>{item.question}</b><small>{statusCopy(item.type)}</small></span><em>→</em></button>) : <p>Follow-up questions appear after the first grounded answer.</p>}</section>}
-
-        {isConversationMode && <section className="meeting-capture-panel"><header><div><span>Session memory</span><h3>Capture what matters without breaking focus.</h3></div><em>{captures.length} saved</em></header><input value={captureText} onChange={(event) => setCaptureText(event.target.value)} placeholder="Type a note, or leave blank to capture the latest transcript turn" /><div>{(['note', 'decision', 'action', 'bookmark', 'open_question'] as const).map((kind) => <button key={kind} onClick={() => void saveConversationCapture(kind)}>{kind === 'open_question' ? 'Question' : statusCopy(kind)}</button>)}</div>{captureNotice && <small>{captureNotice}</small>}{captures.length > 0 && <details><summary>Saved session items ({captures.length})</summary>{captures.slice(-8).map((capture) => <p key={capture.id}><b>{statusCopy(capture.kind)}</b>{capture.text}</p>)}</details>}</section>}
-      </section>
-
-      <aside className={`live-side transcript-${transcriptView}`}><header><div><span>Live transcript</span><b>{segments.length} turns</b></div><nav><button className={transcriptView === 'hidden' ? 'active' : ''} onClick={() => setTranscriptView('hidden')}>Hide</button><button className={transcriptView === 'compact' ? 'active' : ''} onClick={() => setTranscriptView('compact')}>Compact</button><button className={transcriptView === 'expanded' ? 'active' : ''} onClick={() => setTranscriptView('expanded')}>Expand</button></nav></header>{transcriptView !== 'hidden' && <div className="transcript-list">{transcriptItems.map((segment) => <article key={segment.id} className={segment.speaker}><span>{segment.speaker === 'candidate' ? 'You' : segment.speaker === 'interviewer' ? 'Other side' : 'Unknown'}</span><p>{segment.text}</p></article>)}{partial && <article className="interviewer partial"><span>Other side · live</span><p>{partial}</p></article>}{!segments.length && !partial && <div className="transcript-empty"><i>≋</i><b>Transcript appears here</b><p>System audio and microphone remain separate for reliable speaker labels.</p></div>}</div>}<section className="live-diagnostics"><div><span>Network</span><b className={online ? 'ready' : 'failed'}>{online ? 'Connected' : 'Offline'}</b></div><div><span>System-audio channel</span><b className={active && !reconnectAttempts.interviewer ? 'ready' : reconnectAttempts.interviewer ? 'attention' : ''}>{reconnectAttempts.interviewer ? `Retry ${reconnectAttempts.interviewer}` : active ? 'Live' : 'Paused'}</b></div><div><span>Your microphone</span><b className={micConnected && !reconnectAttempts.candidate ? 'ready' : reconnectAttempts.candidate ? 'attention' : ''}>{reconnectAttempts.candidate ? `Retry ${reconnectAttempts.candidate}` : micConnected ? 'Live' : 'Optional'}</b></div><details><summary>Latency diagnostics</summary><div className="timing-grid"><span>Audio → transcript <b>{transcriptLatency == null ? '—' : `${transcriptLatency} ms`}</b></span><span>Transcript → request <b>{detectionLatency == null ? '—' : `${detectionLatency} ms`}</b></span><span>Request → first token <b>{firstTokenLatency == null ? '—' : `${firstTokenLatency} ms`}</b></span><span>Request → first render <b>{firstRenderLatency == null ? '—' : `${firstRenderLatency} ms`}</b></span><span>Answer complete <b>{completionLatency == null ? '—' : `${completionLatency} ms`}</b></span><span>Retrieval <b>{pipelineMetrics.retrievalLatencyMs == null ? '—' : `${pipelineMetrics.retrievalLatencyMs} ms`}</b></span></div></details></section></aside></div>
-
-      <footer className="live-command-bar"><select aria-label="Copilot mode" value={copilotMode} onChange={(event) => setCopilotMode(event.target.value as InterviewMode)}>{interviewModes.map((mode) => <option key={mode} value={mode}>{statusCopy(mode)}</option>)}</select><button className={`capture-toggle ${captureActionKind}`} disabled={finishing || captureBusy} aria-describedby="capture-action-hint" onClick={() => void runCapturePrimaryAction()}><i>{captureActionKind === 'stop' ? '■' : captureActionKind === 'permission' ? '◆' : captureActionKind === 'restart' || captureActionKind === 'retry' ? '↻' : '▶'}</i>{captureActionLabel}</button><span id="capture-action-hint" className="sr-only">{captureActionHint}</span><button className={`screen-toggle ${screenContextEnabled ? 'active' : ''}`} title="When enabled, Ask reads the primary screen once" onClick={() => setScreenContextEnabled((value) => !value)}>▣ Screen {screenContextEnabled ? 'on' : 'off'}</button><select aria-label="Response style" value={responseStyle} onChange={(event) => changeAssistantPreferences({ responseStyle: event.target.value as ResponseStyle })}><option value="adaptive">Smart</option><option value="bullets">Points</option><option value="paragraph">Paragraph</option></select><div className="visibility-mode" role="group" aria-label="Overlay visibility mode" title="Private Overlay is best effort on supported capture paths"><span>Overlay</span><button type="button" className={!privateOverlay ? 'active visible' : ''} aria-pressed={!privateOverlay} onClick={() => void setOverlayPrivacy(false)}>Visible</button><button type="button" className={privateOverlay ? 'active private' : ''} aria-pressed={privateOverlay} onClick={() => void setOverlayPrivacy(true)}>Private</button></div><button className="ask-button" disabled={finishing} onClick={() => void askCoach()}>{screenAnalyzing ? 'Reading screen…' : suggestionLoading ? 'Refresh answer' : 'Ask'} <kbd>⌘↵</kbd></button><select aria-label="Display mode" value={density} onChange={(event) => changeDensity(event.target.value as Density)}><option value="comfortable">Standard</option><option value="compact">Compact</option><option value="minimal">Minimal overlay</option></select><details className="focus-settings"><summary>More</summary><label>Opacity <input type="range" min={MIN_ASSISTANT_OPACITY} max="100" value={assistantPreferences.windowOpacity} onChange={(event) => changeAssistantPreferences({ windowOpacity: Number(event.target.value) })} /></label><label><input type="checkbox" checked={clickThrough} onChange={(event) => setClickThrough(event.target.checked)} />Click-through in Overlay</label><small>Opacity changes the local interface only.</small></details><div className="retention-actions"><button disabled={finishing} onClick={() => void finish('discard')}>Discard</button><button disabled={finishing} onClick={() => void finish('save')}>{finishing ? 'Finishing…' : 'Save notes'}</button></div></footer>
-    </section> : <section className="missing-live"><h1>No prepared session</h1><p>Return to the workspace and prepare a Torvi session first.</p><button onClick={() => void returnToWorkspace()}>Open workspace</button></section>}
   </main>;
 }
 
-ReactDOM.createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>);
+ReactDOM.createRoot(document.getElementById('root')!).render(isNativeDesktop() ? <App /> : <main className="native-required"><h1>Open Torvi on your Mac</h1><p>This interface needs Torvi’s native runtime. Browser previews cannot capture audio, move desktop windows, or verify permissions.</p><p>Launch the installed Torvi.app to continue.</p></main>);

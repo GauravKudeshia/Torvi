@@ -158,15 +158,34 @@ fn repair_system_audio_permission(app: tauri::AppHandle) -> Result<SystemAudioSt
 }
 
 #[tauri::command]
+async fn start_microphone_capture(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    { tauri::async_runtime::spawn_blocking(move || microphone::start(app)).await.map_err(|error| error.to_string())? }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = app; Err("Native microphone capture is currently macOS-only.".into()) }
+}
+
+#[tauri::command]
+fn stop_microphone_capture() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    { microphone::stop() }
+    #[cfg(not(target_os = "macos"))]
+    { Ok(()) }
+}
+
+#[tauri::command]
 async fn start_audio_capture(
     app: tauri::AppHandle,
     state: State<'_, Arc<CaptureState>>,
     include_system_audio: bool,
 ) -> Result<SystemAudioStatus, SystemAudioFailure> {
-    if state.active.load(Ordering::SeqCst) {
+    if state.active.swap(true, Ordering::SeqCst) {
         return Ok(native_audio::status(app, true));
     }
-    let status = native_audio::start(app.clone(), include_system_audio)?;
+    let status = match native_audio::start(app.clone(), include_system_audio) {
+        Ok(status) => status,
+        Err(error) => { state.active.store(false, Ordering::SeqCst); return Err(error); }
+    };
     state.active.store(true, Ordering::SeqCst);
     app.emit(
         "capture-state",
@@ -201,11 +220,36 @@ fn configure_share_safe_overlay(window: tauri::Window, enabled: bool) -> Result<
 }
 
 #[tauri::command]
+fn open_privacy_settings(permission: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let pane = match permission.as_str() {
+            "microphone" => "Privacy_Microphone",
+            "screen" => "Privacy_ScreenCapture",
+            _ => return Err("Unsupported permission settings page.".into()),
+        };
+        let status = std::process::Command::new("/usr/bin/open")
+            .arg(format!("x-apple.systempreferences:com.apple.preference.security?{pane}"))
+            .status().map_err(|error| error.to_string())?;
+        if !status.success() { return Err("Could not open macOS Privacy settings.".into()); }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = permission; Err("Open your operating system's Privacy settings.".into()) }
+}
+
+#[tauri::command]
 fn configure_focus_mode(
     window: tauri::Window,
     enabled: bool,
     click_through: bool,
 ) -> Result<(), String> {
+    window.set_decorations(!enabled).map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    window.set_effects(if enabled { Some(tauri::window::EffectsBuilder::new()
+        .effect(tauri::window::Effect::Popover).state(tauri::window::EffectState::Active)
+        .radius(14.0).build()) } else { None }).map_err(|error| error.to_string())?;
+    window.set_visible_on_all_workspaces(enabled).map_err(|error| error.to_string())?;
     window
         .set_always_on_top(enabled)
         .map_err(|error| error.to_string())?;
@@ -215,38 +259,16 @@ fn configure_focus_mode(
 }
 
 #[tauri::command]
-fn capture_primary_screen(
+async fn capture_primary_screen(
     window: tauri::Window,
     restore_protected: bool,
 ) -> Result<ScreenContextImage, String> {
     #[cfg(target_os = "macos")]
     {
-        // Exclude the copilot from this one capture even when Private Overlay is
-        // off, then restore the user's explicit privacy preference.
-        let _ = window.set_content_protected(true);
-        std::thread::sleep(std::time::Duration::from_millis(80));
-        let path = std::env::temp_dir().join(format!("live-copilot-screen-{}.jpg", unix_time_ms()));
-        let result = std::process::Command::new("/usr/sbin/screencapture")
-            .args(["-x", "-m", "-t", "jpg"])
-            .arg(&path)
-            .status()
-            .map_err(|error| format!("The screen capture tool could not start: {error}"));
-        let _ = window.set_content_protected(restore_protected);
-        let status = result?;
-        if !status.success() {
-            let _ = std::fs::remove_file(&path);
-            return Err(
-                "Screen capture was cancelled or unavailable. Check Screen Recording permission."
-                    .into(),
-            );
-        }
-        let bytes = std::fs::read(&path)
-            .map_err(|error| format!("The screen image could not be read: {error}"));
-        let _ = std::fs::remove_file(&path);
-        return Ok(ScreenContextImage {
-            bytes: bytes?,
-            content_type: "image/jpeg",
-        });
+        let _ = restore_protected; // No privacy toggling or files during capture.
+        let app = window.app_handle().clone();
+        return tauri::async_runtime::spawn_blocking(move || macos::capture_screen(&app, None)).await.map_err(|error| error.to_string())?;
+
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -296,6 +318,7 @@ mod native_audio {
             super::super::macos::start(app, include_system_audio)
         }
         pub fn stop() -> Result<(), String> {
+            super::super::microphone::stop()?;
             super::super::macos::stop()
         }
     }
@@ -381,6 +404,8 @@ mod desktop_api;
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+mod microphone;
 #[cfg(target_os = "windows")]
 mod windows;
 
@@ -390,9 +415,28 @@ pub fn run() {
         .manage(Arc::new(CaptureState::default()))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_store::Builder::new().build())
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show(); let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            let show = tauri::menu::MenuItem::with_id(app, "show", "Show Torvi", true, None::<&str>)?;
+            let quit = tauri::menu::MenuItem::with_id(app, "quit", "Quit Torvi", true, None::<&str>)?;
+            let menu = tauri::menu::Menu::with_items(app, &[&show, &quit])?;
+            tauri::tray::TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .tooltip("Torvi 0.7.0")
+                .menu(&menu)
+                .on_menu_event(|app, event| {
+                    if event.id.as_ref() == "quit" { let _ = native_audio::stop(); app.exit(0); }
+                    if event.id.as_ref() == "show" {
+                        if let Some(window) = app.get_webview_window("main") { let _ = window.show(); let _ = window.set_focus(); }
+                    }
+                }).build(app)?;
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_content_protected(false);
             }
@@ -405,7 +449,10 @@ pub fn run() {
             repair_system_audio_permission,
             start_audio_capture,
             stop_audio_capture,
+            start_microphone_capture,
+            stop_microphone_capture,
             configure_share_safe_overlay,
+            open_privacy_settings,
             configure_focus_mode,
             capture_primary_screen,
             quit_desktop,
