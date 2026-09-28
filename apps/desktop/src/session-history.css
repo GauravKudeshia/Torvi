@@ -1,4 +1,7 @@
 .session-history-workspace {
+  --ink: var(--meeting-text);
+  --muted: var(--meeting-secondary);
+  --faint: var(--meeting-secondary);
   display: grid;
   min-height: 590px;
   grid-template-columns: minmax(250px, 31%) minmax(0, 1fr);
@@ -43,6 +46,17 @@
 .session-browser > nav button.active { color: #dce8ff; border-color: rgba(119,167,255,.2); background: rgba(119,167,255,.1); }
 
 .session-list { min-height: 0; flex: 1; overflow: auto; }
+.session-day-label { font-size: 11px; color: var(--muted); font-weight: 500; margin: 16px 8px 6px; }
+.meeting-detail-actions { padding: 8px 20px; }
+.meeting-detail-actions form { display: flex; flex-wrap: wrap; gap: 8px; }
+.meeting-detail-actions input { min-width: 120px; flex: 1; background: #14171d; color: var(--ink); border: 1px solid var(--line); padding: 8px; border-radius: 7px; }
+.meeting-detail-actions button { border: 1px solid var(--line); background: #1e222b; color: var(--ink); padding: 6px 10px; border-radius: 6px; font-size: 11px; }
+.meeting-detail-actions p { color: #ffa6ae; font-size: 12px; }
+.meeting-captured-notes { margin-top: 22px; }
+.meeting-captured-notes h3 { font-size: 15px; }
+.meeting-captured-notes article { padding: 12px 0; border-bottom: 1px solid var(--line); }
+.meeting-captured-notes span { font-size: 11px; color: var(--muted); }
+.meeting-captured-notes p { font-size: 13px; line-height: 1.7; white-space: pre-wrap; }
 .session-list > button {
   display: grid;
   width: 100%;
@@ -72,7 +86,7 @@
 .session-detail-header { display: flex; min-height: 104px; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 20px 22px 16px; border-bottom: 1px solid var(--line); }
 .session-detail-header > div:first-child { min-width: 0; }
 .session-detail-header > div:first-child > span { color: #84adf8; font-size: 8px; font-weight: 720; letter-spacing: .1em; text-transform: uppercase; }
-.session-detail-header h2 { margin: 5px 0 7px; overflow: hidden; color: var(--ink); font-size: 20px; font-weight: 610; letter-spacing: -.035em; text-overflow: ellipsis; white-space: nowrap; }
+.session-detail-header h2 { margin: 5px 0 7px; color: var(--ink); font-size: 20px; font-weight: 610; letter-spacing: -.035em; overflow-wrap: anywhere; }
 .session-detail-header p { display: flex; align-items: center; gap: 5px; margin: 0; color: var(--faint); font-size: 9px; }
 .session-detail-header p svg { width: 11px; height: 11px; }
 .session-detail-header p i { width: 2px; height: 2px; margin: 0 3px; border-radius: 50%; background: #555963; }
@@ -119,6 +133,14 @@
 .transcript-list time { padding-top: 2px; color: #646873; font-size: 8px; font-variant-numeric: tabular-nums; }
 .transcript-list b { color: #a9c6fb; font-size: 9px; font-weight: 670; }
 .transcript-list p { margin: 4px 0 0; color: #d2d4da; font-size: 11px; line-height: 1.55; user-select: text; }
+.session-history-workspace .transcript-list { max-height: none; }
+.session-history-workspace .transcript-list article { background: var(--meeting-surface); padding: 14px; }
+.session-history-workspace .transcript-list article p { color: var(--meeting-text); font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
+.session-history-workspace .transcript-list time, .session-history-workspace .transcript-list b { color: var(--meeting-secondary); font-size: 11px; }
+.session-history-workspace .session-detail-header p { flex-wrap: wrap; line-height: 1.6; font-size: 11px; }
+.session-history-workspace .summary-grid article > p, .session-history-workspace .chat-answer p, .session-history-workspace .chat-question p { font-size: 13px; line-height: 1.65; }
+.session-history-workspace .summary-grid article > small, .session-history-workspace .session-detail-empty p { font-size: 12px; }
+.session-history-workspace .session-list small, .session-history-workspace .session-list em { font-size: 11px; }
 
 .session-chat-view { display: grid; gap: 14px; }
 .session-chat-view > article { display: grid; gap: 6px; }
@@ -167,5 +189,5 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .session-detail-loading i { animation-duration: 2.8s; }
+  .session-detail-loading i { animation: none; }
 }

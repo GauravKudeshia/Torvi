@@ -562,6 +562,7 @@ pub async fn desktop_finish(
     choice: String,
     live_seconds: u32,
     segments: Value,
+    interactions: Option<Vec<Value>>,
 ) -> Result<Value, String> {
     if choice != "save" && choice != "discard" {
         return Err("Invalid retention choice.".into());
@@ -578,14 +579,21 @@ pub async fn desktop_finish(
     .await?;
     response_value(end_response).await?;
     let finish_path = format!("/api/v1/sessions/{session_id}/{choice}");
+    let interactions = interactions.unwrap_or_default();
+    let interaction_count = interactions.len();
     let body = if choice == "save" {
-        Some(json!({ "segments": segments }))
+        Some(json!({ "segments": segments, "interactions": interactions }))
     } else {
         None
     };
     let result =
         response_value(session_request(&connection, Method::POST, &finish_path, body).await?)
             .await?;
+    if choice == "save" && interaction_count > 0
+        && result.get("savedInteractionsCount").and_then(Value::as_u64) != Some(interaction_count as u64)
+    {
+        return Err("AI history was not confirmed saved. Keep Torvi open and retry after the service is updated.".into());
+    }
     if connection.scope.as_deref() == Some("account") {
         connection.session_id = None;
         save_connection(&connection)?;

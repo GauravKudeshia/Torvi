@@ -1,17 +1,12 @@
-import { z } from 'zod';
-import { modeRequiresVerifiedResume, transcriptSegmentSchema, type InterviewMode } from '@interview-copilot/contracts';
+import { modeRequiresVerifiedResume, sessionSaveSchema, type InterviewMode } from '@interview-copilot/contracts';
 import { eq } from 'drizzle-orm';
 import { getDb } from '@/db';
-import { auditEvents, documents, interviewRounds, reports, roundConcerns, sessionCaptures, sessionDocuments, sessions, transcriptSegments } from '@/db/schema';
+import { auditEvents, documents, interviewRounds, reports, roundConcerns, sessionCaptures, sessionDocuments, sessions, suggestions, transcriptSegments } from '@/db/schema';
 import { requireActor } from '@/lib/auth';
 import { handleApiError, json, parseJson } from '@/lib/http';
 import { ownedSession } from '@/lib/session';
 import { createSessionReport, type SessionReportResult } from '@/lib/openai';
 import { detectRoundConcerns } from '@/lib/interview-memory';
-
-const saveSchema = z.object({
-  segments: z.array(transcriptSegmentSchema).max(2_000).default([]),
-});
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
@@ -19,7 +14,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const { id } = await context.params;
     const session = await ownedSession(id, actor.userId);
     if (session.status === 'discarded') return json({ id, status: 'discarded' });
-    const input = await parseJson(request, saveSchema);
+    const input = await parseJson(request, sessionSaveSchema);
     const db = getDb();
     const now = Date.now();
     const reportId = session.reportId ?? crypto.randomUUID();
@@ -63,6 +58,18 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       createdAt: now,
     }).onConflictDoNothing());
     await Promise.all(writes);
+    // Session-scoped IDs make save retries idempotent and cannot collide with
+    // another user's rows. Client-restored history is not verified evidence.
+    await Promise.all(input.interactions.map(interaction => db.insert(suggestions).values({
+      id: `${id}:${interaction.id}`,
+      sessionId: id,
+      question: interaction.question,
+      responseJson: JSON.stringify(interaction.suggestion),
+      model: 'client-restored-history',
+      grounded: interaction.suggestion.grounded,
+      latencyMs: 0,
+      createdAt: Math.min(now, interaction.createdAt),
+    }).onConflictDoNothing()));
     await db.batch([
       db.insert(reports).values({
         id: reportId,
@@ -123,7 +130,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     await Promise.all(potentialMemory.map((text) => db.insert(sessionCaptures).values({
       id: crypto.randomUUID(), sessionId: id, userId: actor.userId, kind: 'potential_memory', text, createdAt: now,
     })));
-    return json({ id, status: 'saved', reportId, proposedConcerns: detectedConcerns.length, potentialCareerMemories: potentialMemory.length });
+    return json({ id, status: 'saved', reportId, savedInteractionsCount: input.interactions.length, proposedConcerns: detectedConcerns.length, potentialCareerMemories: potentialMemory.length });
   } catch (error) {
     return handleApiError(error);
   }

@@ -25,6 +25,10 @@ if [[ "$identity_name" == "-" ]]; then
   exit 65
 fi
 identity_listing="$(/usr/bin/security find-identity -v -p codesigning)"
+if [[ "$identity_listing" != *"\"${identity_name}\""* ]]; then
+  # Login identities may not be in the invoking shell's default search list.
+  identity_listing="$(/usr/bin/security find-identity -v -p codesigning "${HOME}/Library/Keychains/login.keychain-db")"
+fi
 identity_fingerprint="$(
   print -r -- "$identity_listing" |
     /usr/bin/awk -v identity="$identity_name" 'index($0, "\"" identity "\"") { print $2; exit }'

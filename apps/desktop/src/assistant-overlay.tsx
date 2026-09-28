@@ -6,6 +6,7 @@ import {
   SlidersHorizontal, Sparkles, Trash2, Settings,
 } from 'lucide-react';
 import { formatShortcut } from './shortcuts';
+import { assistantActions, assistantProfiles, formatSessionTime } from '@interview-copilot/sdk';
 import {
   MIN_ASSISTANT_OPACITY,
   type AppearanceMode,
@@ -24,14 +25,6 @@ const assistantSizes: Array<{ id: AssistantSize; label: string }> = [
 ];
 const responseStyles: Array<{ id: ResponseStyle; label: string }> = [
   { id: 'bullets', label: 'Points' }, { id: 'paragraph', label: 'Paragraph' }, { id: 'adaptive', label: 'Adaptive' },
-];
-const quickActions = [
-  { label: 'What should I say next?', prompt: 'What should I say next?' },
-  { label: 'Summarize', prompt: 'Summarize the conversation so far.' },
-  { label: 'Key points', prompt: 'Give me the key points from this conversation.' },
-  { label: 'Explain this', prompt: 'Explain what is currently being discussed in plain language.' },
-  { label: 'Follow-up', prompt: 'Draft the best follow-up question for this moment.' },
-  { label: 'Action items', prompt: 'List the action items, owners, and deadlines mentioned so far.' },
 ];
 
 export function answerText(suggestion: Suggestion | null, streamingAnswer: string, style: ResponseStyle, size: AssistantSize) {
@@ -69,6 +62,8 @@ type AssistantOverlayProps = {
   onToggleListening: () => void; onShorter: () => void; onExpand: () => void; onFollowUp: () => void;
   muted?: boolean; leadingContent?: React.ReactNode; auxiliaryControls: React.ReactNode;
   onHide: () => void; onClose: () => void; onDragStart: (event: React.MouseEvent<HTMLElement>) => void;
+  onAssist?: () => void; onModeChange?: (mode: InterviewMode) => void;
+  seconds?: number; hasSession?: boolean; onEnd?: () => void; finishing?: boolean;
 };
 
 export function AssistantOverlay(props: AssistantOverlayProps) {
@@ -119,6 +114,7 @@ export function AssistantOverlay(props: AssistantOverlayProps) {
     <div className="hud-collapsed-drag window-drag-region" onMouseDown={onDragStart} title="Drag Torvi anywhere"><span className="hud-mark" aria-hidden="true"><i /><i /><i /></span><i className={`hud-live-dot ${active ? 'active' : ''}`} aria-hidden="true" /><span className="compact-state" role="status">{activity}</span></div>
     <input ref={inputRef as React.RefObject<HTMLInputElement>} className="hud-collapsed-input" value={prompt} aria-label="Ask Torvi" placeholder="Ask anything…" onFocus={() => onPanelChange('expanded', true)} onChange={(event) => onPromptChange(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); onPanelChange('expanded', true); } }} />
     <kbd className="hud-shortcut-hint">{formatShortcut(shortcut)}</kbd>
+    <button className="compact-assist" aria-label="Assist with this conversation" title={`Assist · ${formatShortcut(shortcut)}`} disabled={loading || !online} onClick={() => { onPanelChange('expanded'); if (props.onAssist) props.onAssist(); else onQuickAction(assistantActions[0].prompt); }}><Sparkles /></button>
     <button className="hud-collapse-listen" aria-label={captureActionLabel} title={captureActionHint} disabled={captureBusy} onClick={onToggleListening}><PrimaryIcon className={captureBusy ? 'spin' : ''} /></button>
     <button aria-label="Expand assistant" title="Expand assistant" onClick={() => onPanelChange('expanded', true)}><ChevronUp /></button>
     <button aria-label="Hide assistant" title="Hide assistant" onClick={onHide}><Minus /></button>
@@ -127,7 +123,7 @@ export function AssistantOverlay(props: AssistantOverlayProps) {
   return <section className={rootClass} style={rootStyle} aria-label="Torvi assistant">
     <div className="assistant-surface" aria-hidden="true" />
     <header className="hud-header window-drag-region" onMouseDown={onDragStart}>
-      <div className="hud-identity"><span className="hud-mark" aria-hidden="true"><i /><i /><i /></span><span><b>Torvi</b><small>{mode.replaceAll('-', ' ')} copilot</small></span></div>
+      <div className="hud-identity"><span className="hud-mark" aria-hidden="true"><i /><i /><i /></span><span><b>Torvi</b>{props.onModeChange ? <select aria-label="Assistant mode" value={mode} onChange={e => props.onModeChange?.(e.target.value as InterviewMode)}>{!assistantProfiles.some(p => p.id === mode) && <option value={mode}>{mode.replaceAll('-', ' ')}</option>}{assistantProfiles.map(profile => <option key={profile.id} value={profile.id}>{profile.label}</option>)}</select> : <small>{mode.replaceAll('-', ' ')} copilot</small>}</span></div>
       <span className={`hud-session-state ${active ? 'active' : ''}`}><i aria-hidden="true" />{activity}</span>
       {!online && <span className="hud-network offline">Offline</span>}
       <div className="hud-window-actions" data-no-drag><button onClick={() => onPanelChange('collapsed')} title="Collapse assistant" aria-label="Collapse assistant"><ChevronDown /></button><button onClick={onHide} title="Hide assistant" aria-label="Hide assistant"><Minus /></button><button onClick={onClose} title="Open settings and history" aria-label="Open settings and history"><Settings /></button></div>
@@ -135,6 +131,7 @@ export function AssistantOverlay(props: AssistantOverlayProps) {
 
     <div className="hud-body">
       {props.leadingContent || <>
+      <div className="hud-response-region">
       {hasError && !generationError && !props.captureError && <div className="hud-status attention" role="alert" aria-live="polite"><AudioWaveform aria-hidden="true" /><span><b>{captureActionHint}</b><small>{status}</small></span></div>}
       {props.captureError && <div className="hud-status attention" role="alert"><span>{props.captureError}</span><button disabled={captureBusy} onClick={onToggleListening}>Retry audio</button></div>}
       {question && <div className="hud-question"><span>{questionIsLive ? 'Detected question' : 'Current request'}</span><p>{question}</p></div>}
@@ -143,12 +140,14 @@ export function AssistantOverlay(props: AssistantOverlayProps) {
       {generationError && <div className="hud-status attention" role="alert"><span>{generationError}</span><button disabled={loading} onClick={() => onQuickAction(question)}>Retry</button></div>}
       {copyError && <p role="alert">{copyError}</p>}
       {loading && <button className="hud-cancel" onClick={onCancel}>Stop response</button>}
-      <div className="hud-quick-actions" aria-label="Quick actions">{quickActions.slice(0, 2).map((action) => <button disabled={loading || !online} key={action.label} onClick={() => onQuickAction(action.prompt)}>{action.label}</button>)}<details><summary>More</summary>{quickActions.slice(2).map((action) => <button disabled={loading || !online} key={action.label} onClick={() => onQuickAction(action.prompt)}>{action.label}</button>)}</details></div>
+      </div>
+      <div className="hud-quick-actions" aria-label="Quick actions"><button className="hud-assist" disabled={loading || !online} onClick={() => props.onAssist ? props.onAssist() : onQuickAction(assistantActions[0].prompt)}><Sparkles aria-hidden="true" />Assist</button>{assistantActions.slice(1, 2).map(action => <button disabled={loading || !online} key={action.id} onClick={() => onQuickAction(action.prompt)}>{action.label}</button>)}<details><summary>More</summary><div>{assistantActions.slice(2).map(action => <button disabled={loading || !online} key={action.id} onClick={() => onQuickAction(action.prompt)}>{action.label}</button>)}</div></details></div>
       <div className="hud-composer" data-no-drag><textarea ref={inputRef as React.RefObject<HTMLTextAreaElement>} value={prompt} aria-label="Ask Torvi anything" placeholder="Ask anything about your screen or conversation…" rows={2} onChange={(event) => onPromptChange(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.metaKey && !event.ctrlKey) { event.preventDefault(); submit(); } }} /><button className="hud-send" disabled={!prompt.trim() || loading || !online} onClick={submit} aria-label="Send request"><ArrowUp /><kbd>{formatShortcut(shortcut)}</kbd></button></div>
       </>}
     </div>
 
     <footer className="hud-footer" data-no-drag>
+      {props.hasSession && <div className="hud-session-strip"><span>{active ? 'Listening' : 'Paused'} · {formatSessionTime(props.seconds ?? 0)}</span><button disabled={props.finishing} onClick={props.onEnd}>{props.finishing ? 'Saving…' : 'End & save'}</button></div>}
       <button className={`hud-primary-action ${captureActionKind}`} disabled={captureBusy} onClick={onToggleListening} aria-label={captureActionLabel} aria-describedby="hud-primary-hint"><PrimaryIcon className={captureBusy ? 'spin' : ''} /><span>{captureActionLabel}</span></button><span id="hud-primary-hint" className="sr-only">{captureActionHint}</span>
       <div className="hud-format" role="group" aria-label="Answer format">{responseStyles.map((item) => <button type="button" key={item.id} className={preferences.responseStyle === item.id ? 'active' : ''} aria-pressed={preferences.responseStyle === item.id} onClick={() => onPreferencesChange({ responseStyle: item.id })}>{item.label}</button>)}</div>
       <div className={`hud-appearance ${appearanceOpen ? 'open' : ''}`}><button className="hud-appearance-trigger" aria-expanded={appearanceOpen} aria-controls="hud-appearance-panel" aria-label="Assistant appearance" title="Assistant appearance" onClick={() => setAppearanceOpen((value) => !value)}><SlidersHorizontal /></button><section id="hud-appearance-panel" className="hud-appearance-panel" aria-label="Appearance controls"><header><span>Appearance</span><button onClick={onResetAppearance}>Reset</button></header><label className="hud-opacity-label"><span>Window opacity <b>{preferences.windowOpacity}%</b></span><input aria-label="Window opacity" type="range" min={MIN_ASSISTANT_OPACITY} max="100" value={preferences.windowOpacity} onInput={(event) => onPreferencesChange({ windowOpacity: Number(event.currentTarget.value) })} /><small>Opacity changes the app UI only.</small></label><div className="hud-option-group"><span>Theme</span><div>{appearanceModes.map((item) => <button type="button" key={item.id} aria-pressed={preferences.appearanceMode === item.id} className={preferences.appearanceMode === item.id ? 'active' : ''} onClick={() => onPreferencesChange({ appearanceMode: item.id })}>{item.label}</button>)}</div></div><div className="hud-option-group"><span>Size</span><div>{assistantSizes.map((item) => <button type="button" key={item.id} aria-pressed={preferences.assistantSize === item.id} className={preferences.assistantSize === item.id ? 'active' : ''} onClick={() => onPreferencesChange({ assistantSize: item.id })}>{item.label}</button>)}</div></div></section></div>

@@ -1,6 +1,18 @@
-import type { AiProviderDescriptor, SessionStartRequest, SuggestionRequest, TranscriptSegment } from '@interview-copilot/contracts';
+import type { AiProviderDescriptor, SavedInteraction, SessionStartRequest, SuggestionRequest, TranscriptSegment } from '@interview-copilot/contracts';
+import type { MeetingDetail, MeetingRecord } from './meetings';
+export * from './meetings';
 
 export type TokenProvider = () => Promise<string | null>;
+
+async function boundedRequest<T>(operation: (signal: AbortSignal) => Promise<T>, timeoutMs = 45000): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try { return await operation(controller.signal); }
+  catch (error) {
+    if (controller.signal.aborted) throw new Error('The request timed out. Check your connection and retry.');
+    throw error;
+  } finally { clearTimeout(timer); }
+}
 
 export class InterviewCopilotClient {
   constructor(private baseUrl: string, private tokenProvider: TokenProvider) {}
@@ -10,10 +22,13 @@ export class InterviewCopilotClient {
     const headers = new Headers(init.headers);
     if (token) headers.set('authorization', `Bearer ${token}`);
     if (init.body && !(init.body instanceof FormData) && !headers.has('content-type')) headers.set('content-type', 'application/json');
-    const response = await fetch(new URL(path, this.baseUrl), { ...init, headers });
-    const payload = await response.json() as T & { error?: { message?: string } };
-    if (!response.ok) throw new Error(payload.error?.message ?? `Request failed with ${response.status}`);
-    return payload;
+    return boundedRequest(async signal => {
+      const response = await fetch(new URL(path, this.baseUrl), { ...init, headers, signal });
+      const payload = await response.json().catch(() => null) as (T & { error?: { message?: string } }) | null;
+      if (!response.ok) throw new Error(payload?.error?.message ?? `Request failed with ${response.status}`);
+      if (!payload) throw new Error('The service returned an incomplete response. Please retry.');
+      return payload;
+    });
   }
 
   startSession(input: SessionStartRequest) {
@@ -26,6 +41,16 @@ export class InterviewCopilotClient {
 
   documents() {
     return this.request<{ documents: Array<{ id: string; kind: string; parseStatus: string; fileName: string }> }>('/api/v1/documents');
+  }
+
+  sessions() { return this.request<{ sessions: MeetingRecord[] }>('/api/v1/sessions'); }
+  meeting(id: string) { return this.request<MeetingDetail>(`/api/v1/sessions/${encodeURIComponent(id)}/history`); }
+  renameMeeting(id: string, title: string) { return this.request(`/api/v1/sessions/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ title }) }); }
+  createMeetingContext(title: string) {
+    return this.request<{ id: string }>('/api/v1/job-targets', { method: 'POST', body: JSON.stringify({ role: title, company: 'Personal workspace', competencies: [`Interview round: ${title}`] }) });
+  }
+  end(sessionId: string, liveSeconds: number) {
+    return this.request(`/api/v1/sessions/${sessionId}/end`, { method: 'POST', body: JSON.stringify({ liveSeconds: Number.isFinite(liveSeconds) ? Math.min(28800, Math.max(0, Math.floor(liveSeconds))) : 0 }) });
   }
 
   reports() {
@@ -46,8 +71,10 @@ export class InterviewCopilotClient {
     });
   }
 
-  save(sessionId: string, segments: TranscriptSegment[]) {
-    return this.request(`/api/v1/sessions/${sessionId}/save`, { method: 'POST', body: JSON.stringify({ segments }) });
+  async save(sessionId: string, segments: TranscriptSegment[], interactions: SavedInteraction[] = []) {
+    const result = await this.request<{ status: string; savedInteractionsCount?: number }>(`/api/v1/sessions/${sessionId}/save`, { method: 'POST', body: JSON.stringify({ segments, interactions }) });
+    if (interactions.length && result.savedInteractionsCount !== interactions.length) throw new Error('AI history was not confirmed saved. Keep this session open and retry after the service is updated.');
+    return result;
   }
 
   discard(sessionId: string) {
@@ -56,12 +83,15 @@ export class InterviewCopilotClient {
 
   async suggest(sessionId: string, input: SuggestionRequest): Promise<string> {
     const token = await this.tokenProvider();
+    return boundedRequest(async signal => {
     const response = await fetch(new URL(`/api/v1/sessions/${sessionId}/suggestions`, this.baseUrl), {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
       body: JSON.stringify(input),
+      signal,
     });
     if (!response.ok) throw new Error('Suggestion failed.');
     return response.text();
+    }, 90000);
   }
 }

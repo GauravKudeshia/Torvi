@@ -1,15 +1,15 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { assistantActions } from '../packages/sdk/src/meetings';
 
 test('floating assistant has compact and expanded states with a keyboard-first composer', async () => {
   const overlay = await readFile(new URL('../apps/desktop/src/assistant-overlay.tsx', import.meta.url), 'utf8');
   const main = await readFile(new URL('../apps/desktop/src/main.tsx', import.meta.url), 'utf8');
   assert.match(overlay, /type AssistantPanelState = 'collapsed' \| 'expanded'/);
-  assert.match(overlay, /What should I say next\?/);
-  assert.match(overlay, /Summarize/);
-  assert.match(overlay, /Key points/);
-  assert.match(overlay, /Action items/);
+  assert.match(overlay, /assistantActions/);
+  assert.deepEqual(assistantActions.map(action => action.label), ['Assist', 'What should I say?', 'Follow-up', 'Recap', 'Explain this', 'Action items']);
+  assert.match(overlay, /className="hud-assist"/);
   assert.match(overlay, /event\.key === 'Enter'/);
   assert.match(main, /toggleAssistant:.*askOrOpenAssistant/);
   assert.match(main, /panelState === 'collapsed' \? \[460, 58\]/);

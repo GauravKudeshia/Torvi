@@ -14,10 +14,16 @@ import {
 } from 'lucide-react';
 import type { Suggestion } from '@interview-copilot/contracts';
 import { desktopApi } from './desktop-api';
+import { groupMeetings, matchesMeeting, meetingTitle } from '@interview-copilot/sdk';
 import './session-history.css';
+import { meetingTheme } from './meeting-theme';
 
 export type SessionRecord = {
   id: string;
+  title?: string;
+  role?: string | null;
+  company?: string | null;
+  interviewRoundId?: string | null;
   mode: string;
   locale: string;
   status: string;
@@ -42,7 +48,7 @@ export type SessionReport = {
 type TranscriptSegment = { id: string; speaker: 'interviewer' | 'candidate'; text: string; startedAtMs: number; endedAtMs: number };
 type Interaction = { id: string; question: string; suggestion: Suggestion; createdAt: number };
 type Capture = { id: string; kind: string; text: string; owner?: string | null; dueAt?: number | null; createdAt: number };
-type SessionDetail = {
+export type SessionDetail = {
   session: SessionRecord & { title: string; endedAt?: number | null };
   target: { role: string; company?: string | null } | null;
   documents: Array<{ id: string; fileName: string }>;
@@ -96,12 +102,13 @@ function SessionEmpty({ icon: Icon = FileText, title, copy }: { icon?: typeof Fi
   return <div className="session-detail-empty"><Icon aria-hidden="true" /><b>{title}</b><p>{copy}</p></div>;
 }
 
-export function SessionHistory({ sessions, reports, initialSessionId, onSelectSession, onStart }: {
+export function SessionHistory({ sessions, reports, initialSessionId, onSelectSession, onStart, api = desktopApi }: {
   sessions: SessionRecord[];
   reports: SessionReport[];
   initialSessionId?: string;
   onSelectSession: (sessionId: string) => void;
   onStart: () => void;
+  api?: typeof desktopApi;
 }) {
   const requestSequence = React.useRef(0);
   React.useEffect(() => () => { requestSequence.current += 1; }, []);
@@ -114,6 +121,10 @@ export function SessionHistory({ sessions, reports, initialSessionId, onSelectSe
   const [tab, setTab] = React.useState<SessionTab>('summary');
   const [transcriptQuery, setTranscriptQuery] = React.useState('');
   const [copied, setCopied] = React.useState('');
+  const [actionError, setActionError] = React.useState('');
+  const [titleDraft, setTitleDraft] = React.useState<string | null>(null);
+  const [renaming, setRenaming] = React.useState(false);
+  const [titles, setTitles] = React.useState<Record<string, string>>({});
 
   React.useEffect(() => {
     if (!initialSessionId) return;
@@ -128,7 +139,7 @@ export function SessionHistory({ sessions, reports, initialSessionId, onSelectSe
     setDetailState('loading');
     setDetailError('');
     try {
-      const result = await desktopApi<SessionDetail>('GET', `/api/v1/sessions/${sessionId}/history`);
+      const result = await api<SessionDetail>('GET', `/api/v1/sessions/${sessionId}/history`);
       if (request !== requestSequence.current) return;
       setDetail(result);
       setDetailState('ready');
@@ -138,7 +149,7 @@ export function SessionHistory({ sessions, reports, initialSessionId, onSelectSe
       setDetailState('error');
       setDetailError(error instanceof Error ? error.message : String(error));
     }
-  }, []);
+  }, [api]);
 
   React.useEffect(() => {
     if (!selectedId) return;
@@ -154,10 +165,10 @@ export function SessionHistory({ sessions, reports, initialSessionId, onSelectSe
         || (filter === 'practice' && session.mode === 'mock')
         || (filter === 'interviews' && interviewModes.has(session.mode));
       const report = reports.find((item) => item.sessionId === session.id);
-      const searchMatch = !normalized || [session.mode, session.status, report?.summary].filter(Boolean).join(' ').toLowerCase().includes(normalized);
+      const searchMatch = matchesMeeting({ ...session, title: titles[session.id] ?? session.title }, normalized, report?.summary);
       return filterMatch && searchMatch;
     });
-  }, [filter, query, reports, sessions]);
+  }, [filter, query, reports, sessions, titles]);
 
   const transcriptMatches = React.useMemo(() => {
     const normalized = transcriptQuery.trim().toLowerCase();
@@ -171,13 +182,26 @@ export function SessionHistory({ sessions, reports, initialSessionId, onSelectSe
     setSelectedId(sessionId);
     setTab('summary');
     setTranscriptQuery('');
+    setTitleDraft(null); setActionError('');
     onSelectSession(sessionId);
   }
 
   async function copyValue(id: string, value: string) {
-    await navigator.clipboard.writeText(value);
-    setCopied(id);
-    window.setTimeout(() => setCopied(''), 1_200);
+    try { await navigator.clipboard.writeText(value); setCopied(id); setActionError(''); window.setTimeout(() => setCopied(''), 1_200); }
+    catch { setActionError('Clipboard unavailable. Use Export to keep this meeting as a text file.'); }
+  }
+
+  async function renameMeeting() {
+    if (!detail || !titleDraft || titleDraft.trim().length < 2) return;
+    const id = detail.session.id; const title = titleDraft.trim();
+    setRenaming(true); setActionError('');
+    try {
+      await api('PATCH', `/api/v1/sessions/${id}`, { title });
+      setTitles(current => ({ ...current, [id]: title }));
+      setDetail(current => current?.session.id === id ? { ...current, session: { ...current.session, title } } : current);
+      setTitleDraft(null);
+    } catch { setActionError('The title could not be saved. Check your connection and retry.'); }
+    finally { setRenaming(false); }
   }
 
   function exportSession() {
@@ -192,25 +216,27 @@ export function SessionHistory({ sessions, reports, initialSessionId, onSelectSe
       'KEY POINTS', ...(report?.notes ?? []),
       '',
       'ACTION ITEMS', ...(report?.actionItems ?? []),
+      '', 'NOTES AND DECISIONS', ...detail.captures.filter(item => item.kind !== 'potential_memory').map(item => `${titleCase(item.kind)}: ${item.text}`),
       '',
       'TRANSCRIPT', ...detail.transcript.map((segment) => `[${formatTimestamp(segment.startedAtMs)}] ${titleCase(segment.speaker)}: ${segment.text}`),
+      '', 'AI CONVERSATION', ...detail.interactions.flatMap(item => [item.question, answerText(item.suggestion)]),
     ];
     downloadText(`${detail.session.title.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}-torvi.txt`, lines.join('\n'));
   }
 
-  return <div className="session-history-workspace">
+  return <div className="session-history-workspace" style={meetingTheme}>
     <aside className="session-browser" aria-label="Session history">
       <label className="session-search"><Search aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search sessions…" aria-label="Search sessions" /></label>
       <nav aria-label="Filter sessions">{(['all', 'interviews', 'meetings', 'practice'] as SessionFilter[]).map((item) => <button type="button" key={item} className={filter === item ? 'active' : ''} aria-pressed={filter === item} onClick={() => setFilter(item)}>{titleCase(item)}</button>)}</nav>
-      <div className="session-list" role="listbox" aria-label="Saved sessions">
-        {filtered.map((session) => {
+      <div className="session-list" aria-label="Saved sessions">
+        {groupMeetings(filtered).map(group => <React.Fragment key={group.label}><h3 className="session-day-label">{group.label}</h3>{group.meetings.map((session) => {
           const report = reports.find((item) => item.sessionId === session.id);
-          return <button type="button" role="option" aria-selected={selectedId === session.id} key={session.id} className={selectedId === session.id ? 'active' : ''} onClick={() => selectSession(session.id)}>
+          return <button type="button" aria-pressed={selectedId === session.id} key={session.id} className={selectedId === session.id ? 'active' : ''} onClick={() => selectSession(session.id)}>
             <span className={`session-kind mode-${session.mode}`}>{session.mode === 'meeting' ? '≋' : session.mode === 'mock' ? '◎' : '✦'}</span>
-            <span><b>{titleCase(session.mode)}</b><small>{formatDate(session.startedAt)} · {formatDuration(session.liveSeconds)}</small><em>{report?.summary ?? `${titleCase(session.status)} session`}</em></span>
+            <span><b>{titles[session.id] ?? meetingTitle(session)}</b><small>{formatDate(session.startedAt)} · {formatDuration(session.liveSeconds)}</small><em>{report?.summary ?? `${titleCase(session.status)} session`}</em></span>
             {report?.score != null && <strong>{Math.round(report.score)}</strong>}
           </button>;
-        })}
+        })}</React.Fragment>)}
         {!filtered.length && <SessionEmpty icon={Search} title="No matching sessions" copy={query ? 'Try a different search or filter.' : 'Completed sessions will appear here.'} />}
       </div>
     </aside>
@@ -227,6 +253,7 @@ export function SessionHistory({ sessions, reports, initialSessionId, onSelectSe
             <button aria-label="Export session" title="Export session" onClick={exportSession}><Download aria-hidden="true" /><span>Export</span></button>
           </div>
         </header>
+        <div className="meeting-detail-actions">{titleDraft !== null ? <form onSubmit={event => { event.preventDefault(); void renameMeeting(); }}><input aria-label="Meeting title" maxLength={160} minLength={2} required value={titleDraft} onChange={e => setTitleDraft(e.target.value)} /><button disabled={renaming}>{renaming ? 'Saving…' : 'Save title'}</button><button type="button" disabled={renaming} onClick={() => setTitleDraft(null)}>Cancel</button></form> : detail.session.interviewRoundId && <button onClick={() => setTitleDraft(detail.session.title)}>Edit title</button>}{actionError && <p role="alert">{actionError}</p>}</div>
         <nav className="session-tabs" aria-label="Session detail tabs">
           <button className={tab === 'summary' ? 'active' : ''} aria-current={tab === 'summary' ? 'page' : undefined} onClick={() => setTab('summary')}><Clipboard aria-hidden="true" />Summary</button>
           <button className={tab === 'transcript' ? 'active' : ''} aria-current={tab === 'transcript' ? 'page' : undefined} onClick={() => setTab('transcript')}><FileText aria-hidden="true" />Transcript <em>{detail.transcript.length}</em></button>
@@ -239,10 +266,11 @@ export function SessionHistory({ sessions, reports, initialSessionId, onSelectSe
             <div className="summary-grid">
               <article><span>Key points</span>{detail.report.notes.length ? detail.report.notes.map((item) => <p key={item}><i>•</i>{item}</p>) : <small>No key points were generated.</small>}</article>
               <article><span>Decisions</span>{detail.captures.filter((item) => item.kind === 'decision').length ? detail.captures.filter((item) => item.kind === 'decision').map((item) => <p key={item.id}><Check aria-hidden="true" />{item.text}</p>) : <small>No decisions were captured.</small>}</article>
-              <article><span>Action items</span>{detail.report.actionItems.length ? detail.report.actionItems.map((item) => <label key={item}><input type="checkbox" />{item}</label>) : <small>No action items were captured.</small>}</article>
+              <article><span>Action items</span>{detail.report.actionItems.length ? detail.report.actionItems.map((item) => <p key={item}><i>•</i>{item}</p>) : <small>No action items were captured.</small>}</article>
               <article><span>Follow-up</span>{detail.report.followUpEmail ? <><p>{detail.report.followUpEmail}</p><button onClick={() => void copyValue('followup', detail.report?.followUpEmail ?? '')}>{copied === 'followup' ? 'Copied' : 'Copy draft'}</button></> : <small>No follow-up draft is available.</small>}</article>
             </div>
           </div> : <SessionEmpty title="No summary available" copy="This session was not saved with a generated report." />)}
+          {tab === 'summary' && detail.captures.some(item => ['note', 'decision', 'action', 'open_question', 'bookmark'].includes(item.kind)) && <section className="meeting-captured-notes"><h3>Your notes & decisions</h3>{detail.captures.filter(item => ['note', 'decision', 'action', 'open_question', 'bookmark'].includes(item.kind)).map(item => <article key={item.id}><span>{titleCase(item.kind)}{item.owner ? ` · ${item.owner}` : ''}</span><p>{item.text}</p></article>)}</section>}
 
           {tab === 'transcript' && <div className="transcript-view">
             <label className="transcript-search"><Search aria-hidden="true" /><input value={transcriptQuery} onChange={(event) => setTranscriptQuery(event.target.value)} placeholder="Find in transcript…" aria-label="Find in transcript" /><span>{transcriptMatches.length} matches</span></label>
@@ -252,7 +280,7 @@ export function SessionHistory({ sessions, reports, initialSessionId, onSelectSe
           {tab === 'chat' && <div className="session-chat-view">{detail.interactions.map((interaction) => <article key={interaction.id}>
             <div className="chat-question"><span>You</span><p>{interaction.question}</p></div>
             <div className="chat-answer"><span><Sparkles aria-hidden="true" />Torvi <time>{new Date(interaction.createdAt).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</time></span><p>{answerText(interaction.suggestion)}</p><button onClick={() => void copyValue(interaction.id, answerText(interaction.suggestion))}>{copied === interaction.id ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}{copied === interaction.id ? 'Copied' : 'Copy'}</button></div>
-          </article>)}{!detail.interactions.length && <SessionEmpty icon={MessageSquareText} title="No AI chat history" copy="Questions you ask Torvi during a saved session will appear here." />}</div>}
+          </article>)}{!detail.interactions.length && <SessionEmpty icon={MessageSquareText} title="No AI chat history" copy="No AI responses were saved for this meeting. New sessions include completed answers when you choose End & save." />}</div>}
         </div>
       </>}
       {!sessions.length && <button className="session-empty-start" onClick={onStart}>Start Assistant</button>}

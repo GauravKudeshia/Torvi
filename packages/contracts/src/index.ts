@@ -278,6 +278,19 @@ export const suggestionSchema = z.object({
   })).max(6).default([]),
 });
 
+// Answers stay in client memory until the user explicitly saves the session.
+export const savedInteractionSchema = z.object({
+  id: z.string().uuid(),
+  question: z.string().trim().min(1).max(12_000),
+  suggestion: suggestionSchema.refine(value => JSON.stringify(value).length <= 32_000, 'Answer is too large to save.'),
+  createdAt: z.number().int().nonnegative().max(8_640_000_000_000_000),
+});
+export const sessionSaveSchema = z.object({
+  segments: z.array(transcriptSegmentSchema).max(2_000).default([]),
+  interactions: z.array(savedInteractionSchema).max(200).default([]),
+}).refine(value => JSON.stringify(value.interactions).length <= 2_000_000, 'AI history is too large to save.');
+export type SavedInteraction = z.infer<typeof savedInteractionSchema>;
+
 export const careerToolRequestSchema = z.object({
   kind: z.enum(careerToolKinds),
   locale: z.enum(supportedLocales).default('en'),

@@ -16,6 +16,7 @@ import {
   type InterviewMode,
   type ResponseStyle,
   type Suggestion,
+  type SavedInteraction,
   type TranscriptSegment,
 } from '@interview-copilot/contracts';
 import {
@@ -30,6 +31,8 @@ import { SessionLauncher } from './session-launcher';
 import { requestMicrophone } from './microphone';
 const ControlCenter = React.lazy(() => import('./control-center').then(module => ({ default: module.ControlCenter })));
 import { AssistantOverlay, type AssistantPanelState } from './assistant-overlay';
+import { LiveTranscript } from './live-transcript';
+import { assistantActions } from '@interview-copilot/sdk';
 import { desktopApi } from './desktop-api';
 import { ShortcutManager, type ShortcutConflict } from './shortcuts';
 import {
@@ -138,6 +141,7 @@ function eventTimestamp() { return Date.now(); }
 
 function App() {
   const [surface, setSurface] = React.useState<Surface>('live');
+  const [workspaceView, setWorkspaceView] = React.useState<'home' | 'live' | 'sessions'>('home');
   const [active, setActive] = React.useState(false);
   const [density, setDensity] = React.useState<Density>('comfortable');
   const [context, setContext] = React.useState<SessionContext | null>(null);
@@ -194,6 +198,7 @@ function App() {
   const captureBusyRef = React.useRef(false);
   const nativeCaptureStartedRef = React.useRef(false);
   const contextRef = React.useRef<SessionContext | null>(null);
+  const savedInteractionsRef = React.useRef<SavedInteraction[]>([]);
   const questionRef = React.useRef(question);
   const segmentsRef = React.useRef<TranscriptSegment[]>([]);
   const channelsRef = React.useRef<Partial<Record<Channel, { peer: RTCPeerConnection; events: RTCDataChannel }>>>({});
@@ -224,6 +229,7 @@ function App() {
   const panelStateRef = React.useRef<AssistantPanelState>('collapsed');
 
   React.useEffect(() => { contextRef.current = context; }, [context]);
+  React.useEffect(() => { savedInteractionsRef.current = []; }, [context?.session.id]);
   React.useEffect(() => { questionRef.current = question; }, [question]);
   React.useEffect(() => { segmentsRef.current = segments; }, [segments]);
   React.useEffect(() => { assistantPreferencesRef.current = assistantPreferences; }, [assistantPreferences]);
@@ -460,7 +466,7 @@ function App() {
       if (!micBridgeRef.current) startMicMonitor(microphone);
       await connectRealtime('candidate', microphone);
     }
-    activeRef.current = true; setActive(true); setSeconds(0); setSourceVerified(false);
+    activeRef.current = true; setActive(true); setSourceVerified(false);
     setGenerationError(''); setStatus('Listening');
   }
 
@@ -552,6 +558,7 @@ function App() {
       }
       current.metrics.completedAt = eventTimestamp();
       setSuggestion(parsed.data);
+      savedInteractionsRef.current.push({ id: current.requestId, question: current.question, suggestion: parsed.data, createdAt: Date.now() });
       setStreamingAnswer('');
       setLastResponseMode(event.suggestion.responseMode ?? 'concise');
       setSuggestionLoading(false);
@@ -573,6 +580,7 @@ function App() {
   async function askCoach(nextQuestion = questionRef.current, responseMode: 'tiny' | 'concise' | 'standard' | 'detailed' = 'concise', source: PipelineMetrics['source'] = 'manual') {
     if (!contextRef.current) { setLaunchOpen(true); await setAssistantPanel('expanded'); return; }
     if (nextQuestion.trim().length < 2) return;
+    if (savedInteractionsRef.current.length >= 200) { setGenerationError('Save this session before requesting more answers; its AI history limit has been reached.'); return; }
     if (!navigator.onLine) { setGenerationError('You’re offline. Reconnect and retry.'); return; }
     cancelActiveSuggestion();
     const intent = suggestionIntentRef.current;
@@ -643,10 +651,13 @@ function App() {
     if (finishing) return;
     setFinishing(true);
     try {
+      cancelActiveSuggestion(); setSuggestionLoading(false);
       await stopCapture('Finishing session…');
-      await invoke('desktop_finish', { choice, liveSeconds: seconds, segments: segmentsRef.current });
+      await invoke('desktop_finish', { choice, liveSeconds: seconds, segments: segmentsRef.current, interactions: choice === 'save' ? savedInteractionsRef.current : [] });
+      savedInteractionsRef.current = [];
       setContext(null); setSuggestion(null); setQuestion(''); setSegments([]); setBrain(null); setCaptures([]); setScreenAnalysis(''); setSurface('live');
       setStatus(choice === 'save' ? 'Session saved — notes and follow-through are ready' : 'Session discarded — transcript deleted');
+      await returnToWorkspace('sessions');
     } catch (error) { setStatus(realtimeFailure(error)); }
     finally { setFinishing(false); }
   }
@@ -718,7 +729,8 @@ function App() {
     await toggleFocusMode(true);
   }
 
-  async function returnToWorkspace() {
+  async function returnToWorkspace(view: 'home' | 'live' | 'sessions' = 'home') {
+    setWorkspaceView(view);
     if (focusModeRef.current) await toggleFocusMode(false);
     setSurface('workspace');
     await getCurrentWindow().setSize(new LogicalSize(920, 720));
@@ -732,11 +744,8 @@ function App() {
   }
 
   async function askOrOpenAssistant() {
-    if (document.hasFocus() && panelStateRef.current === 'expanded' && questionRef.current.trim().length >= 2) {
-      await askRef.current(questionRef.current);
-    } else {
-      await activateAssistant();
-    }
+    await activateAssistant();
+    await askRef.current(questionRef.current.trim() || assistantActions[0].prompt);
   }
 
   function clearAssistantThread() {
@@ -909,16 +918,16 @@ function App() {
   return <main className={`app-frame surface-${surface} appearance-${assistantPreferences.appearanceMode} ${surface === 'live' ? 'focus-mode' : ''}`} style={frameStyle}>
     {surface === 'workspace' ? <>
       <header className="management-header window-drag-region" onMouseDown={startWindowDrag}><b>Torvi <small>{desktopAppVersion}</small></b><button onClick={() => void openLiveOverlay()}>Back to assistant</button></header>
-      <React.Suspense fallback={<p>Opening settings…</p>}><ControlCenter account={account} activeContext={context} initialView="settings" appVersion={desktopAppVersion} assistantPreferences={assistantPreferences} desktopPreferences={desktopPreferences} shortcuts={shortcuts} shortcutConflicts={shortcutConflicts} onAssistantPreferencesChange={changeAssistantPreferences} onDesktopPreferencesChange={changeDesktopPreferences} onShortcutChange={changeShortcut} onResetShortcuts={resetShortcuts} onResetWindowPosition={resetWindowPosition} onResetAssistantAppearance={resetAssistantAppearance} onAuthenticated={setAccount} onOpenLive={() => context && void openLiveOverlay()} onSessionPrepared={(next) => { setContext(next); setCopilotMode(next.session.mode); setSegments([]); setSuggestion(null); setStreamingAnswer(''); setQuestion(''); void openLiveOverlay(); }} onSignOut={signOut} setStatus={setStatus} /></React.Suspense>
+      <React.Suspense fallback={<p>Opening settings…</p>}><ControlCenter account={account} activeContext={context} initialView={workspaceView} recording={active} liveView={context ? <LiveTranscript segments={segments} active={active} seconds={seconds} title={context.target?.role || 'Live conversation'} onAssistant={() => void openLiveOverlay()} onPause={() => void runCapturePrimaryAction()} onFinish={() => void finish('save')} busy={captureBusy || finishing} /> : undefined} appVersion={desktopAppVersion} assistantPreferences={assistantPreferences} desktopPreferences={desktopPreferences} shortcuts={shortcuts} shortcutConflicts={shortcutConflicts} onAssistantPreferencesChange={changeAssistantPreferences} onDesktopPreferencesChange={changeDesktopPreferences} onShortcutChange={changeShortcut} onResetShortcuts={resetShortcuts} onResetWindowPosition={resetWindowPosition} onResetAssistantAppearance={resetAssistantAppearance} onAuthenticated={setAccount} onOpenLive={() => context && void openLiveOverlay()} onSessionPrepared={(next) => { setSeconds(0); setContext(next); setCopilotMode(next.session.mode); setSegments([]); setSuggestion(null); setStreamingAnswer(''); setQuestion(''); void openLiveOverlay(); }} onSignOut={signOut} setStatus={setStatus} /></React.Suspense>
     </> : <AssistantOverlay
         generationError={generationError}
         captureError={captureError}
-        leadingContent={launchOpen ? <SessionLauncher account={account} onAuthenticated={setAccount} onCancel={() => setLaunchOpen(false)} onReady={next => { contextRef.current = next; setContext(next); setCopilotMode(next.session.mode); setLaunchOpen(false); setStatus('Ready'); }} /> : null}
+        leadingContent={launchOpen ? <SessionLauncher account={account} onAuthenticated={setAccount} onCancel={() => setLaunchOpen(false)} onReady={next => { setSeconds(0); contextRef.current = next; setContext(next); setCopilotMode(next.session.mode); setLaunchOpen(false); setStatus('Ready'); }} /> : null}
         auxiliaryControls={<>
           {active && micConnected && <label><input type="checkbox" checked={micMuted} onChange={event => { const muted = event.target.checked; micStreamRef.current?.getAudioTracks().forEach(track => { track.enabled = !muted; }); setMicMuted(muted); }} />Mute microphone</label>}
           <button onClick={() => void invoke('open_privacy_settings', { permission: 'microphone' }).catch(error => setGenerationError(realtimeFailure(error)))}>Microphone permission settings</button>
           <details><summary>Screen & system audio</summary><p>{systemAudio.reason}</p><button onClick={() => void grantSystemAudio()}>Grant system audio</button><button onClick={() => void invoke('open_privacy_settings', { permission: 'screen' }).catch(error => setGenerationError(realtimeFailure(error)))}>Open Screen Recording settings</button>{systemAudio.state === 'restartRequired' && <button onClick={relaunchApp}>Restart Torvi</button>}<details><summary>System audio diagnostics</summary><p>{systemAudio.diagnostics?.signingStable ? 'Stable signing identity' : 'Signing not verified'}</p><p>{systemAudio.diagnostics?.lastStage}</p><button onClick={() => { if (window.confirm('Reset Torvi’s Screen Recording permission? You will need to grant access again.')) void repairSystemAudio(); }}>Reset permission record (advanced)</button></details></details>
-          <details><summary>Live transcript ({segments.length})</summary>{segments.length ? segments.slice(-30).map(segment => <p key={segment.id}><b>{segment.speaker === 'candidate' ? 'You' : 'Other side'}: </b>{segment.text}</p>) : <p>Start listening to see the conversation here.</p>}</details>
+          <button onClick={() => void returnToWorkspace('live')}>Live transcript · open full workspace ({segments.length})</button>
           <label>Audio source<select aria-label="Audio source" disabled={active || captureBusy} value={audioSource} onChange={event => setAudioSource(event.target.value as typeof audioSource)}><option value="microphone">Microphone</option><option value="both">Microphone + system</option><option value="system">System audio</option></select></label>
           <label><input type="checkbox" checked={screenContextEnabled} onChange={event => setScreenContextEnabled(event.target.checked)} />Use screen on Ask</label><small>Captures the display under your pointer, excluding Torvi. Sent only when you ask.</small>
           <label><input type="checkbox" checked={privateOverlay} onChange={event => void setOverlayPrivacy(event.target.checked)} />Protect from supported screen capture</label><small>Native protection is best effort; modern capture tools may still include Torvi.</small>
@@ -934,6 +943,12 @@ function App() {
         muted={micMuted}
         online={online}
         mode={copilotMode}
+        seconds={seconds}
+        hasSession={Boolean(context)}
+        onAssist={() => { void setAssistantPanel('expanded'); setQuestion(assistantActions[0].prompt); void askCoach(assistantActions[0].prompt); }}
+        onModeChange={next => { if (modeRequiresVerifiedResume(next) && !context?.documents.some(d => d.kind === 'resume' && d.parseStatus === 'verified')) { setGenerationError('This mode needs a verified résumé. Add it in your workspace before switching.'); return; } setCopilotMode(next); }}
+        onEnd={() => { if (window.confirm('End this session and save its transcript and notes?')) void finish('save'); }}
+        finishing={finishing}
         question={partial || question}
         questionIsLive={Boolean(partial)}
         prompt={question}

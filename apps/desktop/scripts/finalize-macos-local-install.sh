@@ -14,8 +14,8 @@ if [[ ! -d "$source_app" ]]; then
   exit 1
 fi
 version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${source_app}/Contents/Info.plist")"
-if [[ "$version" != "0.7.0" ]]; then
-  echo "Expected Torvi 0.7.0; refusing to install stale version ${version}." >&2
+if [[ "$version" != "0.8.0" ]]; then
+  echo "Expected Torvi 0.8.0; refusing to install stale version ${version}." >&2
   exit 1
 fi
 

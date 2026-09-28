@@ -28,6 +28,8 @@ import { type ShortcutConflict } from './shortcuts';
 import { desktopApi } from './desktop-api';
 import { DesktopSettings } from './desktop-settings';
 import { SessionHistory } from './session-history';
+import { MeetingHome } from './meeting-home';
+import './meeting-workspace.css';
 
 export type DesktopAccount = {
   tokenExpiresAt: number;
@@ -42,7 +44,7 @@ export type NativeSessionContext = {
   documents: Array<{ id: string; fileName: string; kind: string; parseStatus: string }>;
 };
 
-type View = 'home' | 'opportunities' | 'prepare' | 'memory' | 'practice' | 'sessions' | 'career' | 'settings';
+type View = 'home' | 'opportunities' | 'prepare' | 'memory' | 'practice' | 'sessions' | 'career' | 'settings' | 'live';
 type OpportunityTab = 'overview' | 'role' | 'preparation' | 'rounds' | 'match' | 'documents';
 type PrepareStep = 'opportunity' | 'interview' | 'evidence' | 'check' | 'consent';
 type CandidateFact = string | { claim: string; evidence?: string };
@@ -51,7 +53,7 @@ type Document = { id: string; kind: 'resume' | 'job-description' | 'other'; file
 type Claim = { id: string; claimText: string; claimType: string; verificationStatus: string; sourceType: string; sourceExcerpt?: string | null; confidence: number; sensitive: boolean };
 type Experience = { id: string; title: string; company?: string | null; role?: string | null; summary?: string | null; technologies: string[]; competencies: string[]; verificationStatus: string; claims: Claim[]; updatedAt: number };
 type Report = { id: string; sessionId: string; mode: string; score: number | null; summary: string; createdAt: number; strengths: string[]; improvements: string[]; notes: string[]; actionItems: string[]; followUpEmail?: string | null };
-type Session = { id: string; jobTargetId?: string | null; interviewRoundId?: string | null; mode: string; locale: string; status: string; startedAt: number; liveSeconds: number; reportId?: string | null };
+type Session = { id: string; title?: string; company?: string | null; jobTargetId?: string | null; interviewRoundId?: string | null; mode: string; locale: string; status: string; startedAt: number; liveSeconds: number; reportId?: string | null };
 type Concern = { id: string; status: string; category: string; summary: string; evidence?: string | null };
 type Round = { id: string; name: string; status: string; objective?: string | null; scheduledAt?: number | null; completedAt?: number | null; summary?: string | null; interviewers: string[]; concerns: Concern[] };
 type Process = { id: string; jobTargetId?: string | null; title: string; status: string; outcome?: string | null; updatedAt: number; rounds: Round[] };
@@ -89,6 +91,7 @@ const navGroups: Array<{ label: string; items: Array<{ id: View; label: string; 
   { label: 'Workspace', items: [
     { id: 'home', label: 'Home', icon: Home },
     { id: 'sessions', label: 'Sessions', icon: History },
+    { id: 'live', label: 'Live transcript', icon: Mic2 },
     { id: 'memory', label: 'Your context', icon: Brain },
   ] },
   { label: 'Prepare', items: [
@@ -143,8 +146,10 @@ function StateDot({ state }: { state: string }) {
   return <i className={`state-dot ${normalized}`} aria-hidden="true" />;
 }
 
-export function ControlCenter({ initialView = 'settings', account, activeContext, appVersion, preview = false, assistantPreferences, desktopPreferences, shortcuts, shortcutConflicts, onAssistantPreferencesChange, onDesktopPreferencesChange, onShortcutChange, onResetShortcuts, onResetWindowPosition, onResetAssistantAppearance, onAuthenticated, onOpenLive, onSessionPrepared, onSignOut, setStatus }: {
+export function ControlCenter({ initialView = 'home', liveView, recording = false, account, activeContext, appVersion, preview = false, assistantPreferences, desktopPreferences, shortcuts, shortcutConflicts, onAssistantPreferencesChange, onDesktopPreferencesChange, onShortcutChange, onResetShortcuts, onResetWindowPosition, onResetAssistantAppearance, onAuthenticated, onOpenLive, onSessionPrepared, onSignOut, setStatus }: {
   initialView?: View;
+  liveView?: React.ReactNode;
+  recording?: boolean;
   account: DesktopAccount | null;
   activeContext: NativeSessionContext | null;
   appVersion: string;
@@ -473,13 +478,20 @@ export function ControlCenter({ initialView = 'settings', account, activeContext
   return <section className={`desktop-shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}><aside className="workspace-sidebar"><div className="sidebar-identity"><div className="mini-mark" aria-hidden="true"><i /><i /><i /></div><div><b>Torvi</b><span>AI conversation copilot</span></div><button className="sidebar-collapse" type="button" aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'} title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'} data-tooltip={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'} onClick={() => setSidebarCollapsed((value) => !value)}>{sidebarCollapsed ? <PanelLeftOpen aria-hidden="true" /> : <PanelLeftClose aria-hidden="true" />}</button></div><nav aria-label="Primary navigation">{navGroups.map((group) => <section className="sidebar-group" key={group.label} aria-label={group.label}><span>{group.label}</span>{group.items.map((item) => { const Icon = item.icon; return <button type="button" key={item.id} className={view === item.id ? 'active' : ''} aria-current={view === item.id ? 'page' : undefined} aria-label={item.label} title={sidebarCollapsed ? item.label : undefined} data-tooltip={item.label} onClick={() => { setView(item.id); setError(''); }}><i><Icon aria-hidden="true" /></i><span>{item.label}</span>{item.id === 'memory' && reviewClaims.length > 0 ? <em aria-label={`${reviewClaims.length} items need review`}>{reviewClaims.length}</em> : null}</button>; })}</section>)}</nav><div className="sidebar-usage"><span>{quota?.plan ?? 'Free'} plan</span><b>{quota ? Math.floor(quota.remainingLiveSeconds / 60) : '—'} live minutes</b><i><span style={{ width: quota ? `${Math.max(4, Math.min(100, quota.remainingLiveSeconds / Math.max(1, quota.liveLimitMinutes * 60) * 100))}%` : '4%' }} /></i></div><button className="sidebar-signout" type="button" aria-label="Sign out on this Mac" title={sidebarCollapsed ? 'Sign out' : undefined} data-tooltip="Sign out" onClick={() => void onSignOut()}><LogOut aria-hidden="true" /><span>Sign out on this Mac</span></button></aside>
     <div className="workspace-canvas">{(error || notice) && <div className={`workspace-banner ${error ? 'error' : 'notice'}`}><span>{error || notice}</span><button aria-label="Dismiss" onClick={() => { setError(''); setNotice(''); }}>×</button></div>}{busy === 'loading' && !loaded ? <div className="workspace-loading"><i /><b>Opening your workspace…</b><span>Loading opportunities, Career Memory, sessions, and reports.</span></div> : null}
 
-      {view === 'home' && loaded && <div className="workspace-view home-view">
-        <header className="workspace-title"><div><span>Today</span><h1>Ready when you are.</h1><p>Get help in the moment. Keep what matters afterward.</p></div></header>
-        {activeContext && <section className="active-session-card"><div className="live-orb"><i /></div><div><span>Prepared session</span><b>{activeContext.target?.role ?? modeCopy[activeContext.session.mode].title}{activeContext.target?.company ? ` at ${activeContext.target.company}` : ''}</b><small>{modeCopy[activeContext.session.mode].title} · {activeContext.documents.length} sources · waiting for audio</small></div><button onClick={onOpenLive}>Open Torvi <span>→</span></button></section>}
-        <section className="native-home-start"><div><h2>Start a conversation</h2><p>Choose a mode and add context only if you need it.</p></div><button onClick={() => startFlow('general')}>New session <span>→</span></button></section>
-        <details className="native-home-more"><summary>Audio and system readiness</summary><p>Microphone and system audio are only checked with your permission.</p><button onClick={() => { setPrepareStep('check'); setView('prepare'); }}>Open system check</button></details>
-        <section className="home-context-grid"><article><div className="section-line"><div><span>Private knowledge</span><h2>{readyDocuments.length ? `${readyDocuments.length} sources ready` : 'Add optional context'}</h2></div><button onClick={() => setView('memory')}>Manage</button></div><p className="context-copy">Personal facts require your approval. Screenshots are analyzed only when you press Ask with Screen enabled and are then discarded.</p></article><article><div className="section-line"><div><span>Recent work</span><h2>Sessions and notes</h2></div><button onClick={() => setView('sessions')}>View all</button></div>{sessions.slice(0, 3).map((session) => <button className="recent-session" key={session.id} onClick={() => { setSelectedSessionId(session.id); setView('sessions'); }}><i className={session.mode === 'meeting' ? 'meeting' : ''}>{session.mode === 'meeting' ? '≋' : '✦'}</i><span><b>{modeCopy[session.mode as InterviewMode]?.title ?? statusLabel(session.mode)}</b><small>{formatDate(session.startedAt)} · {formatDuration(session.liveSeconds)}</small></span><em>{statusLabel(session.status)}</em></button>)}{!sessions.length && <EmptyState title="No sessions yet" copy="Your live conversations and saved notes will appear here." />}</article></section>
-      </div>}
+      {view === 'home' && loaded && <MeetingHome
+        sessions={sessions} mode={mode} onMode={setMode} recording={recording}
+        activeTitle={activeContext ? activeContext.target?.role || modeCopy[activeContext.session.mode].title : undefined}
+        sourceCount={readyDocuments.length} onStart={() => startFlow(mode)} onOpenLive={onOpenLive}
+        onOpenSession={id => { setSelectedSessionId(id); setView('sessions'); }}
+        onHistory={() => setView('sessions')} onContext={() => setView('memory')}
+        onReadiness={() => { setPrepareStep('check'); setView('prepare'); }}
+        upcoming={processes.flatMap(process => process.rounds.filter(round => round.scheduledAt && round.scheduledAt >= Date.now() && !['completed', 'cancelled'].includes(round.status)).map(round => ({
+          id: round.id, name: round.name, scheduledAt: round.scheduledAt!, processTitle: process.title,
+          processId: process.id, targetId: process.jobTargetId, objective: round.objective, interviewers: round.interviewers,
+        }))).sort((a, b) => a.scheduledAt - b.scheduledAt)}
+        onPrepare={round => { if (round.targetId) chooseTarget(round.targetId); setSelectedProcessId(round.processId); setOpportunityTab('preparation'); setView('opportunities'); }}
+      />}
+      {view === 'live' && (liveView || <EmptyState title="No active conversation" copy="Start a session to see its live transcript here." action={<button onClick={() => startFlow(mode)}>Prepare a session</button>} />)}
 
       {view === 'prepare' && <div className="workspace-view prepare-view"><header className="workspace-title compact-title"><div><span>{modeCopy[mode].title}</span><h1>Prepare the live workspace</h1><p>Everything Torvi needs is configured here on your Mac.</p></div><button className="quiet-button" onClick={() => setView('home')}>Back to Home</button></header><nav className="setup-steps" aria-label="Torvi setup steps">{(['opportunity', 'interview', 'evidence', 'check', 'consent'] as PrepareStep[]).map((step, index) => <button key={step} className={prepareStep === step ? 'active' : ''} onClick={() => setPrepareStep(step)}><i>{index + 1}</i><span>{step === 'opportunity' ? 'Context' : step === 'interview' ? 'Behavior' : step === 'check' ? 'System check' : step}</span></button>)}</nav><section className="setup-workbench">
         {prepareStep === 'opportunity' && <div className="setup-pane"><div className="pane-heading"><span>01 · Conversation</span><h2>{modeRequiresVerifiedResume(mode) ? 'Which role are you interviewing for?' : 'What is this conversation about?'}</h2><p>Choose a saved profile or create session context without leaving the app.</p></div><label className="field wide"><span>Saved profile</span><select value={selectedTargetId} onChange={(event) => event.target.value ? chooseTarget(event.target.value) : resetTarget()}><option value="">Create a new profile</option>{targets.map((target) => <option key={target.id} value={target.id}>{target.role} · {target.company}</option>)}</select></label><div className="field-grid"><label className="field"><span>{modeRequiresVerifiedResume(mode) ? 'Job position' : 'Conversation title'}</span><input value={role} onChange={(event) => setRole(event.target.value)} placeholder={modeRequiresVerifiedResume(mode) ? 'Senior Product Manager' : 'Weekly product review'} /></label><label className="field"><span>{modeRequiresVerifiedResume(mode) ? 'Company' : 'Organization or team (optional)'}</span><input value={company} onChange={(event) => setCompany(event.target.value)} placeholder="Acme" /></label><label className="field wide"><span>{modeRequiresVerifiedResume(mode) ? 'Job description' : 'Agenda and context'}</span><textarea value={jobDescription} onChange={(event) => setJobDescription(event.target.value)} placeholder={modeRequiresVerifiedResume(mode) ? 'Paste the complete role description…' : 'Add the goal, background, constraints, and important context…'} /></label></div><div className="setup-footer"><span>This profile is persisted to your account for reuse.</span><button onClick={async () => { if (await saveOpportunity()) setPrepareStep('interview'); }} disabled={busy === 'target'}>{busy === 'target' ? 'Saving…' : 'Save & continue'} <em>→</em></button></div></div>}

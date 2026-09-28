@@ -5,7 +5,7 @@
     "version": "0.1.0",
     "orientation": "portrait",
     "scheme": "interviewcopilot",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "dark",
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.interviewcopilot.app",

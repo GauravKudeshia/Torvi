@@ -2,8 +2,8 @@
   "cli": { "version": ">= 16.0.0", "appVersionSource": "remote" },
   "build": {
     "development": { "developmentClient": true, "distribution": "internal" },
-    "preview": { "distribution": "internal", "channel": "preview" },
-    "production": { "autoIncrement": true, "channel": "production" }
+    "preview": { "distribution": "internal", "channel": "preview", "env": { "TORVI_REQUIRE_MOBILE_CONFIG": "1" } },
+    "production": { "autoIncrement": true, "channel": "production", "env": { "TORVI_REQUIRE_MOBILE_CONFIG": "1" } }
   },
   "submit": {
     "production": {

@@ -1772,7 +1772,7 @@ dependencies = [
 
 [[package]]
 name = "interview-copilot"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "reqwest",
  "rustls",
