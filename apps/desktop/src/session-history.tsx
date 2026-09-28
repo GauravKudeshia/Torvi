@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import type { Suggestion } from '@interview-copilot/contracts';
 import { desktopApi } from './desktop-api';
-import { groupMeetings, matchesMeeting, meetingTitle } from '@interview-copilot/sdk';
+import { groupMeetings, matchesMeeting, meetingTitle, transcriptOffsetMs } from '@interview-copilot/sdk';
 import './session-history.css';
 import { meetingTheme } from './meeting-theme';
 
@@ -218,7 +218,7 @@ export function SessionHistory({ sessions, reports, initialSessionId, onSelectSe
       'ACTION ITEMS', ...(report?.actionItems ?? []),
       '', 'NOTES AND DECISIONS', ...detail.captures.filter(item => item.kind !== 'potential_memory').map(item => `${titleCase(item.kind)}: ${item.text}`),
       '',
-      'TRANSCRIPT', ...detail.transcript.map((segment) => `[${formatTimestamp(segment.startedAtMs)}] ${titleCase(segment.speaker)}: ${segment.text}`),
+      'TRANSCRIPT', ...detail.transcript.map((segment) => `[${formatTimestamp(transcriptOffsetMs(segment.startedAtMs, detail.session.startedAt))}] ${titleCase(segment.speaker)}: ${segment.text}`),
       '', 'AI CONVERSATION', ...detail.interactions.flatMap(item => [item.question, answerText(item.suggestion)]),
     ];
     downloadText(`${detail.session.title.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}-torvi.txt`, lines.join('\n'));
@@ -274,7 +274,7 @@ export function SessionHistory({ sessions, reports, initialSessionId, onSelectSe
 
           {tab === 'transcript' && <div className="transcript-view">
             <label className="transcript-search"><Search aria-hidden="true" /><input value={transcriptQuery} onChange={(event) => setTranscriptQuery(event.target.value)} placeholder="Find in transcript…" aria-label="Find in transcript" /><span>{transcriptMatches.length} matches</span></label>
-            <div className="transcript-list">{transcriptMatches.map((segment) => <article key={segment.id}><time>{formatTimestamp(segment.startedAtMs)}</time><div><b>{segment.speaker === 'candidate' ? 'You' : 'Other speaker'}</b><p>{segment.text}</p></div></article>)}{!transcriptMatches.length && <SessionEmpty icon={FileText} title="No transcript available" copy={transcriptQuery ? 'No transcript lines match this search.' : 'No transcript was saved for this session.'} />}</div>
+            <div className="transcript-list">{transcriptMatches.map((segment) => <article key={segment.id}><time>{formatTimestamp(transcriptOffsetMs(segment.startedAtMs, detail.session.startedAt))}</time><div><b>{segment.speaker === 'candidate' ? 'You' : 'Other speaker'}</b><p>{segment.text}</p></div></article>)}{!transcriptMatches.length && <SessionEmpty icon={FileText} title="No transcript available" copy={transcriptQuery ? 'No transcript lines match this search.' : 'No transcript was saved for this session.'} />}</div>
           </div>}
 
           {tab === 'chat' && <div className="session-chat-view">{detail.interactions.map((interaction) => <article key={interaction.id}>

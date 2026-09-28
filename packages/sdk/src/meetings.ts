@@ -1,4 +1,5 @@
 import type { InterviewMode, Suggestion, TranscriptSegment } from '@interview-copilot/contracts';
+import { transcriptOffsetMs } from './transcript';
 
 // View models over existing routes, not a second persistence model.
 export type MeetingRecord = {
@@ -67,7 +68,7 @@ export function meetingExport(detail: MeetingDetail) {
   return [meetingTitle(detail.session), `${new Date(detail.session.startedAt).toLocaleString()} · ${formatSessionTime(detail.session.liveSeconds)}`,
     '', 'Overview', detail.report?.summary || 'No generated summary.', '', 'Action items', ...(detail.report?.actionItems ?? []),
     '', 'Discussion points', ...(detail.report?.notes ?? []), '', 'Notes and decisions', ...detail.captures.filter(c => c.kind !== 'potential_memory').map(c => `${c.kind}: ${c.text}`),
-    '', 'Transcript', ...detail.transcript.map(s => `[${formatSessionTime(s.startedAtMs / 1000)}] ${s.speaker === 'candidate' ? 'You' : 'Room / other speaker'}: ${s.text}`),
+    '', 'Transcript', ...detail.transcript.map(s => `[${formatSessionTime(transcriptOffsetMs(s.startedAtMs, detail.session.startedAt) / 1000)}] ${s.speaker === 'candidate' ? 'You' : 'Room / other speaker'}: ${s.text}`),
     '', 'AI conversation', ...detail.interactions.flatMap(i => [i.question, i.suggestion.expandedAnswer || i.suggestion.answer]),
   ].join('\n');
 }

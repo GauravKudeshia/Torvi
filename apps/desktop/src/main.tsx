@@ -32,7 +32,8 @@ import { requestMicrophone } from './microphone';
 const ControlCenter = React.lazy(() => import('./control-center').then(module => ({ default: module.ControlCenter })));
 import { AssistantOverlay, type AssistantPanelState } from './assistant-overlay';
 import { LiveTranscript } from './live-transcript';
-import { assistantActions } from '@interview-copilot/sdk';
+import { assistantActions, hasTranscriptItem, suggestionTranscript, transcriptOffsetMs } from '@interview-copilot/sdk';
+import { CaptureLifecycle } from './capture-lifecycle';
 import { desktopApi } from './desktop-api';
 import { ShortcutManager, type ShortcutConflict } from './shortcuts';
 import {
@@ -196,6 +197,9 @@ function App() {
   const [captureNotice, setCaptureNotice] = React.useState('');
   const activeRef = React.useRef(false);
   const captureBusyRef = React.useRef(false);
+  const captureLifecycleRef = React.useRef(new CaptureLifecycle());
+  const finishingRef = React.useRef(false);
+  const sessionOriginRef = React.useRef({ id: '', startedAt: 0 });
   const nativeCaptureStartedRef = React.useRef(false);
   const contextRef = React.useRef<SessionContext | null>(null);
   const savedInteractionsRef = React.useRef<SavedInteraction[]>([]);
@@ -311,7 +315,11 @@ function App() {
       partialQuestionTimerRef.current = null;
     }
     if (isLikelyTranscriptNoise(transcript)) return;
-    const now = eventTimestamp();
+    if (hasTranscriptItem(segmentsRef.current, channel, typeof payload.item_id === 'string' ? payload.item_id : undefined)) return;
+    const session = contextRef.current?.session;
+    if (!session) return;
+    if (sessionOriginRef.current.id !== session.id) sessionOriginRef.current = { id: session.id, startedAt: session.startedAt ?? Date.now() };
+    const now = transcriptOffsetMs(Date.now(), sessionOriginRef.current.startedAt);
     appendSegment({ id: crypto.randomUUID(), speaker: channel, text: transcript, startedAtMs: now, endedAtMs: now + 1, final: true, itemId: typeof payload.item_id === 'string' ? payload.item_id : undefined });
     if (channel === 'candidate' && audioSourceRef.current !== 'microphone') { setStatus('Your side was transcribed'); return; }
     setQuestion(transcript);
@@ -354,56 +362,77 @@ function App() {
     setReconnectAttempts({ ...reconnectAttemptRef.current });
     const waitMs = Math.min(8_000, 700 * 2 ** Math.min(attempt - 1, 4));
     setStatus(`${channel === 'interviewer' ? 'System audio' : 'Microphone'} transcription interrupted — reconnecting automatically (${attempt})`);
-    reconnectTimersRef.current[channel] = window.setTimeout(async () => {
+    reconnectTimersRef.current[channel] = window.setTimeout(() => {
       delete reconnectTimersRef.current[channel];
       if (!activeRef.current) return;
-      let stream = streamForChannel(channel);
-      if (channel === 'candidate' && (!stream || stream.getAudioTracks().every((track) => track.readyState === 'ended'))) {
-        try {
-          micStreamRef.current?.getTracks().forEach((track) => track.stop());
-          stream = await acquireMicrophone();
-          micStreamRef.current = stream; setMicConnected(true);
-          if (micMonitorRef.current) { window.cancelAnimationFrame(micMonitorRef.current.frame); void micMonitorRef.current.audioContext.close(); micMonitorRef.current = null; }
-          if (!micBridgeRef.current) startMicMonitor(stream);
-        } catch { setMicConnected(false); stream = null; }
-      }
-      if (!stream) return;
-      try { channelsRef.current[channel]?.peer.close(); delete channelsRef.current[channel]; await connectRealtime(channel, stream); setStatus(`${channel === 'interviewer' ? 'System audio' : 'Microphone'} transcription recovered`); }
-      catch { scheduleReconnect(channel); }
+      void captureLifecycleRef.current.run(async signal => {
+        let stream = streamForChannel(channel);
+        if (channel === 'candidate' && (!stream || stream.getAudioTracks().every((track) => track.readyState === 'ended'))) {
+          try {
+            micStreamRef.current?.getTracks().forEach((track) => track.stop());
+            stream = await acquireMicrophone(signal);
+            micStreamRef.current = stream;
+            signal.throwIfAborted();
+            setMicConnected(true);
+            if (micMonitorRef.current) { window.cancelAnimationFrame(micMonitorRef.current.frame); void micMonitorRef.current.audioContext.close(); micMonitorRef.current = null; }
+            if (!micBridgeRef.current) startMicMonitor(stream);
+          } catch (error) { if (signal.aborted) throw error; setMicConnected(false); stream = null; }
+        }
+        if (!stream) return;
+        channelsRef.current[channel]?.peer.close(); delete channelsRef.current[channel];
+        await connectRealtime(channel, stream, signal);
+        signal.throwIfAborted();
+        setStatus(`${channel === 'interviewer' ? 'System audio' : 'Microphone'} transcription recovered`);
+      }).catch(() => { if (activeRef.current) scheduleReconnect(channel); });
     }, waitMs);
   }
 
-  async function connectRealtime(channel: Channel, stream: MediaStream) {
+  async function connectRealtime(channel: Channel, stream: MediaStream, signal: AbortSignal) {
     const credential = await invoke<RealtimeCredential>('desktop_realtime', { channel, clientTurnDetection: false });
+    signal.throwIfAborted();
     const peer = new RTCPeerConnection();
     const track = stream.getAudioTracks()[0];
     if (!track) throw new Error(`${channel === 'interviewer' ? 'System audio' : 'Microphone'} did not provide an audio track.`);
     peer.addTrack(track, stream);
     const events = peer.createDataChannel('oai-events');
-    events.onmessage = (event) => handleRealtimeEvent(channel, event.data as string);
+    events.onmessage = (event) => { if (!signal.aborted) handleRealtimeEvent(channel, event.data as string); };
     peer.onconnectionstatechange = () => {
+      if (signal.aborted) return;
       if (peer.connectionState === 'connected') { reconnectAttemptRef.current[channel] = 0; setReconnectAttempts({ ...reconnectAttemptRef.current }); }
       if (['failed', 'disconnected'].includes(peer.connectionState)) scheduleReconnect(channel);
     };
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let rejectOpen: (error: Error) => void = () => undefined;
     const opened = new Promise<void>((resolve, reject) => {
+      rejectOpen = reject;
       timer = setTimeout(() => reject(new Error('The realtime channel timed out.')), 30_000);
       events.onopen = () => resolve();
       events.onerror = () => reject(new Error('The realtime event channel failed.'));
     });
     // Attach a handler immediately; negotiation can fail before awaiting open.
     void opened.catch(() => undefined);
+    const request = new AbortController();
+    const abort = () => {
+      request.abort();
+      events.onmessage = null; peer.onconnectionstatechange = null;
+      events.close(); peer.close();
+      rejectOpen(new DOMException('Capture stopped', 'AbortError'));
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    const requestTimeout = setTimeout(() => request.abort(), 25_000);
     try {
+      signal.throwIfAborted();
       const offer = await peer.createOffer(); await peer.setLocalDescription(offer);
-      const sdp = await fetch(credential.endpoint || 'https://api.openai.com/v1/realtime/calls', { method: 'POST', headers: { authorization: `Bearer ${credential.clientSecret}`, 'content-type': 'application/sdp' }, body: offer.sdp, signal: AbortSignal.timeout(25_000) });
+      const sdp = await fetch(credential.endpoint || 'https://api.openai.com/v1/realtime/calls', { method: 'POST', headers: { authorization: `Bearer ${credential.clientSecret}`, 'content-type': 'application/sdp' }, body: offer.sdp, signal: request.signal });
       const answer = await sdp.text();
       if (!sdp.ok) throw new Error('The transcription service could not connect. Stop listening and retry.');
       await peer.setRemoteDescription({ type: 'answer', sdp: answer }); await opened;
+      signal.throwIfAborted();
       if (!stream.getAudioTracks().some(track => track.readyState === 'live')) throw new Error('The audio source was stopped.');
       channelsRef.current[channel] = { peer, events };
     } catch (error) {
       events.onmessage = null; peer.onconnectionstatechange = null; events.close(); peer.close(); throw error;
-    } finally { clearTimeout(timer); }
+    } finally { clearTimeout(timer); clearTimeout(requestTimeout); signal.removeEventListener('abort', abort); }
   }
 
   function startMicMonitor(stream: MediaStream) {
@@ -435,69 +464,91 @@ function App() {
     setSystemAudio((current) => ({ ...current, state: failure.state, permissionGranted: failure.state !== 'permissionRequired', captureActive: false, reason: `${failure.message} (${failure.category} · ${failure.stage}${failure.code == null ? '' : ` · ${failure.code}`})` })); setStatus(failure.message);
   }
 
-  async function acquireMicrophone(): Promise<MediaStream> {
-    if (!/Mac/i.test(navigator.platform)) return requestMicrophone();
+  async function acquireMicrophone(signal: AbortSignal): Promise<MediaStream> {
+    if (!/Mac/i.test(navigator.platform)) {
+      const stream = await requestMicrophone();
+      if (signal.aborted) { stream.getTracks().forEach(track => track.stop()); signal.throwIfAborted(); }
+      return stream;
+    }
     await invoke('stop_microphone_capture');
+    signal.throwIfAborted();
     await micBridgeRef.current?.close();
+    signal.throwIfAborted();
     micBridgeRef.current = await createSystemAudioBridge();
+    signal.throwIfAborted();
     // The helper reports ready only after receiving actual input-device frames.
     // Set the teardown flag before the bounded native command can reject.
     nativeMicStartedRef.current = true;
     await invoke('start_microphone_capture');
+    signal.throwIfAborted();
     return micBridgeRef.current.stream;
   }
 
-  async function startCapture() {
+  async function startCapture(signal: AbortSignal) {
     if (!contextRef.current) { setLaunchOpen(true); await setAssistantPanel('expanded'); return; }
+    const session = contextRef.current.session;
+    if (sessionOriginRef.current.id !== session.id) sessionOriginRef.current = { id: session.id, startedAt: session.startedAt ?? Date.now() };
     setCaptureError('');
     if (audioSourceRef.current !== 'microphone') {
       const permission = await refreshSystemAudio();
+      signal.throwIfAborted();
       if (permission.state === 'permissionRequired') throw new Error('Screen Recording permission is required for system audio. Choose Microphone or enable access in Settings.');
       if (permission.state === 'restartRequired') throw new Error('Restart Torvi once to apply Screen Recording access.');
-      setSystemAudio(await invoke<SystemAudioStatus>('start_audio_capture', { includeSystemAudio: true }));
       nativeCaptureStartedRef.current = true;
+      const audioStatus = await invoke<SystemAudioStatus>('start_audio_capture', { includeSystemAudio: true });
+      signal.throwIfAborted();
+      setSystemAudio(audioStatus);
       systemAudioBridgeRef.current = await createSystemAudioBridge();
-      await connectRealtime('interviewer', systemAudioBridgeRef.current.stream);
+      signal.throwIfAborted();
+      await connectRealtime('interviewer', systemAudioBridgeRef.current.stream, signal);
     }
     if (audioSourceRef.current !== 'system') {
-      const microphone = await acquireMicrophone();
+      const microphone = await acquireMicrophone(signal);
       micStreamRef.current = microphone;
+      signal.throwIfAborted();
       setMicConnected(true); setMicMuted(false);
       if (!micBridgeRef.current) startMicMonitor(microphone);
-      await connectRealtime('candidate', microphone);
+      await connectRealtime('candidate', microphone, signal);
     }
+    signal.throwIfAborted();
     activeRef.current = true; setActive(true); setSourceVerified(false);
     setGenerationError(''); setStatus('Listening');
   }
 
   async function stopCapture(nextStatus = 'Live audio paused', failure?: SystemAudioFailure) {
     cancelActiveSuggestion(); setSuggestionLoading(false);
-    const stopNative = activeRef.current || nativeCaptureStartedRef.current;
-    nativeCaptureStartedRef.current = false;
-    activeRef.current = false; setActive(false); setLevel(0); setMicLevel(0); setSourceVerified(false);
-    const stopNativeMic = nativeMicStartedRef.current;
-    nativeMicStartedRef.current = false;
-    if (stopNativeMic) await invoke('stop_microphone_capture').catch(() => undefined);
-    Object.values(reconnectTimersRef.current).forEach((timer) => window.clearTimeout(timer)); reconnectTimersRef.current = {};
-    reconnectAttemptRef.current = { interviewer: 0, candidate: 0 }; setReconnectAttempts({ interviewer: 0, candidate: 0 });
-    micStreamRef.current?.getTracks().forEach((track) => track.stop()); micStreamRef.current = null; setMicConnected(false);
-    const micBridge = micBridgeRef.current; micBridgeRef.current = null; await micBridge?.close().catch(() => undefined);
-    if (micMonitorRef.current) { window.cancelAnimationFrame(micMonitorRef.current.frame); void micMonitorRef.current.audioContext.close(); micMonitorRef.current = null; }
-    const systemAudioBridge = systemAudioBridgeRef.current; systemAudioBridgeRef.current = null; await systemAudioBridge?.close().catch(() => undefined);
-    Object.values(channelsRef.current).forEach((channel) => channel?.peer.close()); channelsRef.current = {};
-    if (stopNative) await invoke('stop_audio_capture').catch(() => undefined);
-    if (failure) { applyNativeAudioFailure(failure); return; }
-    const nextAudio = await invoke<SystemAudioStatus>('system_audio_status').catch(() => null); if (nextAudio) setSystemAudio(nextAudio); setStatus(nextStatus);
+    activeRef.current = false; setActive(false);
+    if (partialQuestionTimerRef.current != null) window.clearTimeout(partialQuestionTimerRef.current);
+    partialQuestionTimerRef.current = null;
+    partialsRef.current = { interviewer: {}, candidate: {} }; setPartial('');
+    return captureLifecycleRef.current.stop(async () => {
+      const stopNative = activeRef.current || nativeCaptureStartedRef.current;
+      nativeCaptureStartedRef.current = false;
+      activeRef.current = false; setActive(false); setLevel(0); setMicLevel(0); setSourceVerified(false);
+      const stopNativeMic = nativeMicStartedRef.current;
+      nativeMicStartedRef.current = false;
+      if (stopNativeMic) await invoke('stop_microphone_capture').catch(() => undefined);
+      Object.values(reconnectTimersRef.current).forEach((timer) => window.clearTimeout(timer)); reconnectTimersRef.current = {};
+      reconnectAttemptRef.current = { interviewer: 0, candidate: 0 }; setReconnectAttempts({ interviewer: 0, candidate: 0 });
+      micStreamRef.current?.getTracks().forEach((track) => track.stop()); micStreamRef.current = null; setMicConnected(false);
+      const micBridge = micBridgeRef.current; micBridgeRef.current = null; await micBridge?.close().catch(() => undefined);
+      if (micMonitorRef.current) { window.cancelAnimationFrame(micMonitorRef.current.frame); void micMonitorRef.current.audioContext.close(); micMonitorRef.current = null; }
+      const systemAudioBridge = systemAudioBridgeRef.current; systemAudioBridgeRef.current = null; await systemAudioBridge?.close().catch(() => undefined);
+      Object.values(channelsRef.current).forEach((channel) => channel?.peer.close()); channelsRef.current = {};
+      if (stopNative) await invoke('stop_audio_capture').catch(() => undefined);
+      if (failure) { applyNativeAudioFailure(failure); return; }
+      const nextAudio = await invoke<SystemAudioStatus>('system_audio_status').catch(() => null); if (nextAudio) setSystemAudio(nextAudio); setStatus(nextStatus);
+    });
   }
   async function toggleCapture() {
-    if (captureBusyRef.current) return;
+    if (captureBusyRef.current || finishingRef.current) return;
     captureBusyRef.current = true;
     setCaptureIntent(activeRef.current ? 'stopping' : 'starting');
     try {
       if (activeRef.current) await stopCapture();
-      else await startCapture();
+      else { captureLifecycleRef.current.begin(); await captureLifecycleRef.current.run(startCapture); }
     }
-    catch (error) { setCaptureError(realtimeFailure(error)); const nativeFailure = nativeAudioFailure(error); await stopCapture(realtimeFailure(error), nativeFailure ?? undefined); }
+    catch (error) { if (captureLifecycleRef.current.cancelled) return; setCaptureError(realtimeFailure(error)); const nativeFailure = nativeAudioFailure(error); await stopCapture(realtimeFailure(error), nativeFailure ?? undefined); }
     finally { captureBusyRef.current = false; setCaptureIntent('idle'); }
   }
 
@@ -578,6 +629,7 @@ function App() {
   }
 
   async function askCoach(nextQuestion = questionRef.current, responseMode: 'tiny' | 'concise' | 'standard' | 'detailed' = 'concise', source: PipelineMetrics['source'] = 'manual') {
+    if (finishingRef.current) return;
     if (!contextRef.current) { setLaunchOpen(true); await setAssistantPanel('expanded'); return; }
     if (nextQuestion.trim().length < 2) return;
     if (savedInteractionsRef.current.length >= 200) { setGenerationError('Save this session before requesting more answers; its AI history limit has been reached.'); return; }
@@ -604,7 +656,7 @@ function App() {
     if (responseMode !== 'detailed') setAnswerLayer('five');
     setStatus(responseMode === 'detailed' ? 'Going deeper with context and trade-offs…' : 'Reading the live context and streaming a speakable answer…');
     try {
-      await invoke('desktop_suggest', { requestId, payload: { question: nextQuestion, screenContext: liveScreenContext || undefined, mode: copilotMode, locale: contextRef.current.session.locale, responseMode, responseStyle, transcript: segmentsRef.current, verifiedFacts: [], target: {} } });
+      await invoke('desktop_suggest', { requestId, payload: { question: nextQuestion, screenContext: liveScreenContext || undefined, mode: copilotMode, locale: contextRef.current.session.locale, responseMode, responseStyle, transcript: suggestionTranscript(segmentsRef.current), verifiedFacts: [], target: {} } });
       const current = activeSuggestionRef.current;
       if (current?.requestId === requestId) {
         current.parser.finish((event) => handleSuggestionStreamEvent({ ...event, requestId }));
@@ -648,7 +700,8 @@ function App() {
   }
 
   async function finish(choice: 'save' | 'discard') {
-    if (finishing) return;
+    if (finishingRef.current) return;
+    finishingRef.current = true;
     setFinishing(true);
     try {
       cancelActiveSuggestion(); setSuggestionLoading(false);
@@ -659,7 +712,7 @@ function App() {
       setStatus(choice === 'save' ? 'Session saved — notes and follow-through are ready' : 'Session discarded — transcript deleted');
       await returnToWorkspace('sessions');
     } catch (error) { setStatus(realtimeFailure(error)); }
-    finally { setFinishing(false); }
+    finally { finishingRef.current = false; setFinishing(false); }
   }
 
   async function signOut() {

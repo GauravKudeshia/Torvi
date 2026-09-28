@@ -1,6 +1,7 @@
 import type { AiProviderDescriptor, SavedInteraction, SessionStartRequest, SuggestionRequest, TranscriptSegment } from '@interview-copilot/contracts';
 import type { MeetingDetail, MeetingRecord } from './meetings';
 export * from './meetings';
+export * from './transcript';
 
 export type TokenProvider = () => Promise<string | null>;
 

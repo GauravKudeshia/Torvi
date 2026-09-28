@@ -39,7 +39,7 @@ export type DesktopAccount = {
 };
 
 export type NativeSessionContext = {
-  session: { id: string; mode: InterviewMode; locale: 'en' | 'es' | 'fr' | 'de' | 'hi'; status: string };
+  session: { id: string; mode: InterviewMode; locale: 'en' | 'es' | 'fr' | 'de' | 'hi'; status: string; startedAt?: number };
   target: { id?: string; role: string; company: string | null; jobDescription: string | null } | null;
   documents: Array<{ id: string; fileName: string; kind: string; parseStatus: string }>;
 };
