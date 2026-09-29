@@ -1,6 +1,6 @@
 # Torvi
 
-Torvi is a consent-first AI assistant for meetings, interviews, sales calls, presentations, study sessions, and general professional conversations. It combines a responsive web workspace with a native Tauri macOS overlay, streaming transcription, screen-aware assistance, private context packs, configurable point/paragraph/adaptive answers, saved session history, and explicit retention controls.
+Torvi is a consent-first AI assistant for meetings, sales calls, presentations, study sessions, and general professional conversations. It combines a responsive web workspace with a native Tauri macOS overlay, streaming transcription, screen-aware assistance, private context packs, configurable point/paragraph/adaptive answers, saved session history, and explicit retention controls.
 
 
 ## Primary stack
