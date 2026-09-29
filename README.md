@@ -2,7 +2,6 @@
 
 Torvi is a consent-first AI assistant for meetings, interviews, sales calls, presentations, study sessions, and general professional conversations. It combines a responsive web workspace with a native Tauri macOS overlay, streaming transcription, screen-aware assistance, private context packs, configurable point/paragraph/adaptive answers, saved session history, and explicit retention controls.
 
-The product is original and uses the supplied Cluely references only for interaction and quality inspiration. It does not implement proctoring bypass, monitoring evasion, or universal “undetectability.” Private Overlay is a clearly labeled, best-effort display preference on supported macOS capture paths.
 
 ## Primary stack
 
